@@ -1,0 +1,14 @@
+{
+  "name": "genomewalker-zellij-mcp",
+  "description": "Control Zellij terminal multiplexer from Claude Code. Open panes, run commands, orchestrate multi-pane workflows.",
+  "owner": {
+    "name": "Antonio Fernandez-Guerra"
+  },
+  "plugins": [
+    {
+      "name": "zellij-mcp",
+      "source": "./",
+      "description": "Control Zellij terminal multiplexer from Claude Code. Open panes, run commands, orchestrate multi-pane workflows."
+    }
+  ]
+}

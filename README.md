@@ -4,19 +4,32 @@ Control [Zellij](https://zellij.dev) terminal multiplexer from [Claude Code](htt
 
 ## Installation
 
-### Claude Code Marketplace (recommended)
-
-```
-/install zellij-mcp
-```
-
-### Manual
+### Quick Install
 
 ```bash
 git clone https://github.com/genomewalker/zellij-mcp
 cd zellij-mcp
 ./scripts/install.sh
 ```
+
+### Manual
+
+1. Clone the repository:
+```bash
+git clone https://github.com/genomewalker/zellij-mcp
+```
+
+2. Install Python dependencies:
+```bash
+pip install mcp
+```
+
+3. Register the MCP server:
+```bash
+claude mcp add --transport stdio --scope user zellij-mcp -- python3 /path/to/zellij-mcp/server.py
+```
+
+4. Restart Claude Code
 
 ## Requirements
 
@@ -49,10 +62,21 @@ After installation, Claude Code can control your Zellij session:
 
 ### Commands
 - `write_chars` - Send text to pane
-- `write_command` - Execute command (text + Enter)
+- `run_command` - Execute command (text + Enter)
+- `dump_screen` - Capture pane output to file
 
 ### Session
 - `list_sessions` / `session_info` / `dump_layout`
+
+## Safety When Running Inside Zellij
+
+When Claude Code runs inside a Zellij pane:
+
+1. **Always specify your session** - Use `session_info` first, then pass `--session` on all commands
+2. **Never close your own pane** - Only close other panes you created
+3. **Create work in separate tabs** - Easier to manage and capture output
+
+See `.claude-plugin/CLAUDE.md` for detailed guidelines.
 
 ## Combining with prism-nvim
 

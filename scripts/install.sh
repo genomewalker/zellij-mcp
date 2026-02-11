@@ -19,6 +19,11 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 
+if ! command -v claude &>/dev/null; then
+    echo "Error: claude CLI not found"
+    exit 1
+fi
+
 # Check for mcp package
 if ! python3 -c "import mcp" &>/dev/null; then
     echo "Installing mcp package..."
@@ -28,40 +33,11 @@ fi
 # Make server executable
 chmod +x "$PLUGIN_DIR/server.py"
 
-# Add to Claude Code MCP config
-MCP_CONFIG="$HOME/.claude/mcp.json"
-if [[ -f "$MCP_CONFIG" ]]; then
-    # Check if already configured
-    if grep -q "zellij-mcp" "$MCP_CONFIG"; then
-        echo "zellij-mcp already in MCP config"
-    else
-        echo "Adding zellij-mcp to MCP config..."
-        # Use jq to add the entry
-        if command -v jq &>/dev/null; then
-            tmp=$(mktemp)
-            jq --arg path "$PLUGIN_DIR/server.py" \
-               '.mcpServers["zellij-mcp"] = {"command": "python3", "args": [$path]}' \
-               "$MCP_CONFIG" > "$tmp" && mv "$tmp" "$MCP_CONFIG"
-        else
-            echo "Warning: jq not found. Please add manually to $MCP_CONFIG:"
-            echo '  "zellij-mcp": {"command": "python3", "args": ["'"$PLUGIN_DIR/server.py"'"]}'
-        fi
-    fi
-else
-    echo "Creating MCP config..."
-    mkdir -p "$(dirname "$MCP_CONFIG")"
-    cat > "$MCP_CONFIG" << EOF
-{
-  "mcpServers": {
-    "zellij-mcp": {
-      "command": "python3",
-      "args": ["$PLUGIN_DIR/server.py"]
-    }
-  }
-}
-EOF
-fi
+# Register MCP server with Claude Code
+echo "Registering MCP server..."
+claude mcp add --transport stdio --scope user zellij-mcp -- python3 "$PLUGIN_DIR/server.py"
 
+echo ""
 echo "Done! Restart Claude Code to use zellij-mcp tools."
 echo ""
-echo "Tools available via ToolSearch: new_pane, write_command, focus_tab, etc."
+echo "Tools available via ToolSearch: new_pane, write_chars, focus_tab, etc."

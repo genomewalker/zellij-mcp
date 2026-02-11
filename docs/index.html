@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>zellij-mcp</title>
+<meta name="description" content="Claude controls Zellij terminal multiplexer via MCP.">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --orange: #f97316;
+  --orange-bright: #fb923c;
+  --orange-glow: rgba(249, 115, 22, 0.4);
+  --green: #22c55e;
+  --blue: #3b82f6;
+  --bg: #0a0a0a;
+  --bg-card: #111;
+  --bg-code: #0d0d0d;
+  --border: #222;
+  --text: #888;
+  --text-bright: #eee;
+  --mono: "JetBrains Mono", monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--mono);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+::selection { background: var(--orange); color: #000; }
+
+a { color: var(--orange); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Grid background */
+.grid-bg {
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(249,115,22,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(249,115,22,0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* Header */
+header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  padding: 16px 32px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(10,10,10,0.8);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text-bright);
+}
+
+.logo span { color: var(--orange); }
+
+nav { display: flex; gap: 32px; }
+nav a { color: var(--text); font-size: 13px; }
+nav a:hover { color: var(--orange); text-decoration: none; }
+
+.gh-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+.gh-link:hover { color: var(--text-bright); text-decoration: none; }
+
+/* Hero */
+.hero {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 120px 24px 80px;
+  position: relative;
+}
+
+.hero::before {
+  content: "";
+  position: absolute;
+  top: 20%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, var(--orange-glow) 0%, transparent 70%);
+  opacity: 0.3;
+  pointer-events: none;
+  animation: pulse 4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.2; transform: translateX(-50%) scale(1); }
+  50% { opacity: 0.4; transform: translateX(-50%) scale(1.1); }
+}
+
+.hero h1 {
+  font-size: clamp(48px, 10vw, 100px);
+  font-weight: 700;
+  color: var(--text-bright);
+  letter-spacing: -4px;
+  margin-bottom: 16px;
+  position: relative;
+}
+
+.hero h1 .dash {
+  color: var(--orange);
+  text-shadow: 0 0 30px var(--orange-glow);
+}
+
+.tagline {
+  font-size: clamp(16px, 3vw, 22px);
+  color: var(--text);
+  margin-bottom: 48px;
+  max-width: 550px;
+}
+
+.tagline strong {
+  color: var(--green);
+}
+
+/* Demo terminal */
+.demo {
+  width: 100%;
+  max-width: 900px;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 40px 80px rgba(0,0,0,0.5), 0 0 0 1px rgba(249,115,22,0.1);
+  margin-bottom: 48px;
+}
+
+.demo-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 18px;
+  background: #151515;
+  border-bottom: 1px solid var(--border);
+}
+
+.demo-dot { width: 12px; height: 12px; border-radius: 50%; background: #333; }
+.demo-dot.r { background: #ff5f57; }
+.demo-dot.y { background: #febc2e; }
+.demo-dot.g { background: #28c840; }
+
+.demo-title {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  color: #555;
+  margin-right: 48px;
+}
+
+.demo-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  min-height: 300px;
+}
+
+.pane {
+  padding: 16px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  position: relative;
+}
+
+.pane-label {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 10px;
+  color: #444;
+  background: #181818;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.pane.claude { background: #0f0f0f; grid-column: 1; grid-row: 1 / 3; }
+.pane.nvim { background: #0a0a0a; }
+.pane.tests { background: #0a0a0a; }
+
+.pane.highlight { border-color: var(--orange); animation: pane-flash 0.6s ease; }
+
+@keyframes pane-flash {
+  0% { border-color: var(--orange); box-shadow: inset 0 0 20px rgba(249,115,22,0.2); }
+  100% { border-color: var(--orange); box-shadow: none; }
+}
+
+.prompt { color: var(--green); }
+.cmd { color: var(--text-bright); }
+.output { color: #666; }
+
+.cursor {
+  display: inline-block;
+  width: 8px;
+  height: 14px;
+  background: var(--orange);
+  margin-left: 2px;
+  animation: blink 1s step-end infinite;
+  vertical-align: middle;
+}
+
+@keyframes blink { 50% { opacity: 0; } }
+
+.replay {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  background: #181818;
+  border: 1px solid #333;
+  color: #666;
+  padding: 8px 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.replay:hover { border-color: var(--orange); color: var(--orange); }
+
+/* Scroll hint */
+.scroll-hint {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #444;
+  font-size: 12px;
+  animation: bounce 2s infinite;
+}
+
+@keyframes bounce {
+  0%, 100% { transform: translateX(-50%) translateY(0); }
+  50% { transform: translateX(-50%) translateY(8px); }
+}
+
+/* Install section */
+.install {
+  padding: 120px 24px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.install h2 {
+  font-size: 14px;
+  color: var(--orange);
+  text-transform: uppercase;
+  letter-spacing: 3px;
+  margin-bottom: 12px;
+}
+
+.install h3 {
+  font-size: clamp(28px, 5vw, 40px);
+  color: var(--text-bright);
+  font-weight: 600;
+  margin-bottom: 48px;
+  letter-spacing: -1px;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.step {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+.step-num {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--orange);
+}
+
+.step-content h4 {
+  font-size: 16px;
+  color: var(--text-bright);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.step-content p {
+  color: var(--text);
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+.code-block {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.code-block code {
+  color: var(--text-bright);
+  font-size: 13px;
+  flex: 1;
+  overflow-x: auto;
+}
+
+.code-block .comment { color: #555; }
+.code-block .url { color: var(--orange); }
+
+.copy {
+  background: transparent;
+  border: 1px solid #333;
+  color: #666;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.copy:hover { border-color: var(--orange); color: var(--orange); }
+.copy.done { border-color: var(--orange); color: var(--orange); }
+
+.step-note {
+  font-size: 12px;
+  color: #555;
+  margin-top: 12px;
+}
+
+/* Features */
+.features {
+  padding: 120px 24px;
+  background: linear-gradient(180deg, transparent, rgba(249,115,22,0.02));
+}
+
+.features-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.features h2 {
+  font-size: 14px;
+  color: var(--orange);
+  text-transform: uppercase;
+  letter-spacing: 3px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.section-subtitle {
+  text-align: center;
+  color: var(--text);
+  font-size: 15px;
+  margin-bottom: 48px;
+  max-width: 500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+
+.feature {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 28px;
+  transition: all 0.3s;
+}
+
+.feature:hover {
+  border-color: #333;
+  transform: translateY(-4px);
+}
+
+.feature-icon {
+  font-size: 24px;
+  margin-bottom: 20px;
+}
+
+.feature h3 {
+  font-size: 15px;
+  color: var(--text-bright);
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.feature p {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.7;
+}
+
+/* Tools section */
+.tools {
+  padding: 80px 24px 120px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.tools h2 {
+  font-size: 14px;
+  color: var(--orange);
+  text-transform: uppercase;
+  letter-spacing: 3px;
+  margin-bottom: 32px;
+  text-align: center;
+}
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.tool-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.tool-name {
+  background: #181818;
+  border: 1px solid #333;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--orange);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tool-desc {
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* Footer */
+footer {
+  padding: 48px 24px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+.footer-links {
+  display: flex;
+  justify-content: center;
+  gap: 32px;
+  margin-bottom: 24px;
+}
+
+.footer-links a { color: var(--text); font-size: 13px; }
+.footer-links a:hover { color: var(--orange); }
+
+.footer-credit {
+  font-size: 12px;
+  color: #444;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  header { padding: 12px 16px; }
+  nav { display: none; }
+
+  .hero { padding: 100px 20px 60px; min-height: auto; }
+  .hero h1 { letter-spacing: -2px; }
+
+  .demo-layout { grid-template-columns: 1fr; grid-template-rows: auto; }
+  .pane.claude { grid-column: 1; grid-row: auto; }
+  .pane { min-height: 100px; }
+
+  .install { padding: 80px 20px; }
+  .step { grid-template-columns: 40px 1fr; gap: 16px; }
+  .step-num { width: 40px; height: 40px; font-size: 16px; }
+  .code-block { flex-direction: column; align-items: stretch; gap: 12px; }
+  .code-block code { font-size: 11px; }
+
+  .feature-grid { grid-template-columns: 1fr; gap: 16px; }
+  .feature { padding: 24px 20px; }
+
+  .tool-grid { grid-template-columns: 1fr; }
+
+  .scroll-hint { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="grid-bg"></div>
+
+<header>
+  <div class="logo">zellij<span>-</span>mcp</div>
+  <nav>
+    <a href="#install">Install</a>
+    <a href="#features">Features</a>
+    <a href="#tools">Tools</a>
+  </nav>
+  <a href="https://github.com/genomewalker/zellij-mcp" class="gh-link">
+    <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</header>
+
+<section class="hero">
+  <h1>zellij<span class="dash">-</span>mcp</h1>
+  <p class="tagline"><strong>Claude</strong> controls your terminal. Create panes, run commands, orchestrate workflows.</p>
+
+  <div class="demo" style="position: relative;">
+    <div class="demo-bar">
+      <div class="demo-dot r"></div>
+      <div class="demo-dot y"></div>
+      <div class="demo-dot g"></div>
+      <div class="demo-title">zellij</div>
+    </div>
+    <div class="demo-layout">
+      <div class="pane claude" id="pane-claude">
+        <div class="pane-label">Claude</div>
+        <div id="claude-content">
+          <span class="prompt">you:</span> <span id="user-msg"></span><span class="cursor" id="cursor"></span>
+        </div>
+        <div id="claude-response" style="margin-top: 12px; color: #666;"></div>
+        <div id="claude-cmd" style="margin-top: 8px; color: var(--orange); font-size: 11px;"></div>
+      </div>
+      <div class="pane nvim" id="pane-nvim">
+        <div class="pane-label">nvim</div>
+        <div id="nvim-content" style="color: #555;">
+          <span style="color: #444;">~</span><br>
+          <span style="color: #444;">~</span><br>
+          <span style="color: #444;">~ VIM - Vi IMproved</span>
+        </div>
+      </div>
+      <div class="pane tests" id="pane-tests">
+        <div class="pane-label">tests</div>
+        <div id="tests-content" style="color: #555;"></div>
+      </div>
+    </div>
+    <button class="replay" onclick="replay()">↻ replay</button>
+  </div>
+
+  <div class="scroll-hint">↓ scroll</div>
+</section>
+
+<section class="install" id="install">
+  <h2>Get Started</h2>
+  <h3>Clone, install, restart.</h3>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-content">
+        <h4>Clone the repository</h4>
+        <div class="code-block">
+          <code>git clone <span class="url">https://github.com/genomewalker/zellij-mcp</span></code>
+          <button class="copy" onclick="copyCmd(this, 'git clone https://github.com/genomewalker/zellij-mcp')">copy</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-content">
+        <h4>Run the installer</h4>
+        <div class="code-block">
+          <code>cd zellij-mcp && <span class="url">./scripts/install.sh</span></code>
+          <button class="copy" onclick="copyCmd(this, 'cd zellij-mcp && ./scripts/install.sh')">copy</button>
+        </div>
+        <p class="step-note">Installs Python dependencies and registers the MCP server.</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-content">
+        <h4>Restart Claude Code</h4>
+        <p>Then start talking: "open a floating pane", "create a new tab"</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="features" id="features">
+  <div class="features-inner">
+    <h2>Why zellij-mcp</h2>
+    <p class="section-subtitle">Turn natural language into terminal orchestration. 35+ tools for complete control.</p>
+
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="feature-icon">🪟</div>
+        <h3>Pane Control</h3>
+        <p>Create, close, resize, focus panes. Split horizontally or vertically. Toggle floating windows.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📑</div>
+        <h3>Tab Management</h3>
+        <p>Create named tabs, switch between them, rename, close. Organize your workspace with voice.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">⌨️</div>
+        <h3>Command Execution</h3>
+        <p>Send text, run commands, capture output. Claude types and presses Enter for you.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🌐</div>
+        <h3>Cross-Session</h3>
+        <p>Control any Zellij session from anywhere. List sessions, target by name.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📸</div>
+        <h3>Screen Capture</h3>
+        <p>Dump pane content to files. Capture output, logs, test results for analysis.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🔗</div>
+        <h3>Pairs with prism.nvim</h3>
+        <p>Open nvim via zellij-mcp, edit with prism-nvim, run tests in another pane. Full workflow.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="tools" id="tools">
+  <h2>Tools Reference</h2>
+  <div class="tool-grid">
+    <div class="tool-item"><span class="tool-name">new_pane</span><span class="tool-desc">Create pane (floating, direction, command)</span></div>
+    <div class="tool-item"><span class="tool-name">close_pane</span><span class="tool-desc">Close the focused pane</span></div>
+    <div class="tool-item"><span class="tool-name">focus_pane</span><span class="tool-desc">Move focus (up/down/left/right)</span></div>
+    <div class="tool-item"><span class="tool-name">toggle_floating</span><span class="tool-desc">Toggle floating panes</span></div>
+    <div class="tool-item"><span class="tool-name">new_tab</span><span class="tool-desc">Create a new tab</span></div>
+    <div class="tool-item"><span class="tool-name">focus_tab</span><span class="tool-desc">Switch to tab by name/index</span></div>
+    <div class="tool-item"><span class="tool-name">write_chars</span><span class="tool-desc">Send text to pane</span></div>
+    <div class="tool-item"><span class="tool-name">run_command</span><span class="tool-desc">Execute command + Enter</span></div>
+    <div class="tool-item"><span class="tool-name">dump_screen</span><span class="tool-desc">Capture pane to file</span></div>
+    <div class="tool-item"><span class="tool-name">session_info</span><span class="tool-desc">Get current session details</span></div>
+    <div class="tool-item"><span class="tool-name">list_sessions</span><span class="tool-desc">List all Zellij sessions</span></div>
+    <div class="tool-item"><span class="tool-name">dump_layout</span><span class="tool-desc">Export current layout</span></div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-links">
+    <a href="https://github.com/genomewalker/zellij-mcp">GitHub</a>
+    <a href="https://github.com/genomewalker/zellij-mcp/issues">Issues</a>
+    <a href="https://github.com/genomewalker/zellij-mcp#readme">Docs</a>
+  </div>
+  <div class="footer-credit">zellij-mcp — Claude meets Zellij</div>
+</footer>
+
+<script>
+function copyCmd(btn, text) {
+  navigator.clipboard.writeText(text);
+  btn.textContent = 'copied';
+  btn.classList.add('done');
+  setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('done'); }, 2000);
+}
+
+// Demo animation
+const scenario = [
+  { type: 'user', text: 'open nvim in a pane on the right' },
+  { type: 'response', text: 'Creating pane...' },
+  { type: 'cmd', text: 'new_pane --direction right --command "nvim"' },
+  { type: 'pane', id: 'pane-nvim', action: 'highlight' },
+  { type: 'wait', ms: 1000 },
+  { type: 'user', text: 'create a test pane below it' },
+  { type: 'response', text: 'On it.' },
+  { type: 'cmd', text: 'new_pane --direction down' },
+  { type: 'pane', id: 'pane-tests', action: 'highlight' },
+  { type: 'wait', ms: 1000 },
+  { type: 'user', text: 'run npm test there' },
+  { type: 'response', text: 'Running tests...' },
+  { type: 'cmd', text: 'write_chars "npm test" + Enter' },
+  { type: 'tests', text: '$ npm test\n\n PASS  src/app.test.ts\n ✓ renders correctly (23 ms)\n ✓ handles click (12 ms)' },
+];
+
+let timeouts = [];
+
+function clearAllTimeouts() {
+  timeouts.forEach(t => clearTimeout(t));
+  timeouts = [];
+}
+
+function wait(ms) {
+  return new Promise(r => {
+    const t = setTimeout(r, ms);
+    timeouts.push(t);
+  });
+}
+
+function typeText(el, text, speed) {
+  return new Promise(resolve => {
+    let i = 0;
+    function t() {
+      if (i < text.length) {
+        el.textContent += text[i++];
+        const tid = setTimeout(t, speed);
+        timeouts.push(tid);
+      } else {
+        resolve();
+      }
+    }
+    t();
+  });
+}
+
+async function runDemo() {
+  clearAllTimeouts();
+
+  // Reset
+  document.getElementById('user-msg').textContent = '';
+  document.getElementById('claude-response').textContent = '';
+  document.getElementById('claude-cmd').textContent = '';
+  document.getElementById('cursor').style.display = 'inline-block';
+  document.getElementById('tests-content').textContent = '';
+  document.querySelectorAll('.pane').forEach(p => p.classList.remove('highlight'));
+
+  await wait(500);
+
+  for (const step of scenario) {
+    if (step.type === 'user') {
+      document.getElementById('user-msg').textContent = '';
+      document.getElementById('claude-response').textContent = '';
+      document.getElementById('claude-cmd').textContent = '';
+      document.getElementById('cursor').style.display = 'inline-block';
+      await typeText(document.getElementById('user-msg'), step.text, 25);
+      document.getElementById('cursor').style.display = 'none';
+      await wait(300);
+    } else if (step.type === 'response') {
+      document.getElementById('claude-response').textContent = step.text;
+      await wait(200);
+    } else if (step.type === 'cmd') {
+      document.getElementById('claude-cmd').textContent = '→ ' + step.text;
+      await wait(400);
+    } else if (step.type === 'pane') {
+      document.getElementById(step.id).classList.add('highlight');
+      await wait(500);
+    } else if (step.type === 'tests') {
+      document.getElementById('tests-content').innerHTML = step.text.replace(/\n/g, '<br>').replace(/PASS/g, '<span style="color: var(--green)">PASS</span>').replace(/✓/g, '<span style="color: var(--green)">✓</span>');
+      await wait(500);
+    } else if (step.type === 'wait') {
+      await wait(step.ms);
+    }
+  }
+}
+
+function replay() {
+  runDemo();
+}
+
+window.addEventListener('load', () => {
+  setTimeout(runDemo, 800);
+});
+</script>
+
+</body>
+</html>

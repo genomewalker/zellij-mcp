@@ -1,10 +1,26 @@
 # zellij-mcp
 
-Control [Zellij](https://zellij.dev) terminal multiplexer from [Claude Code](https://claude.ai/claude-code).
+**Claude controls your terminal. Create panes, run commands, orchestrate workflows.**
 
-## Installation
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Zellij](https://img.shields.io/badge/Zellij-0.40+-orange?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDIgN2wxMCA1IDEwLTV6Ii8+PC9zdmc+)](https://zellij.dev)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-MCP-blue)](https://docs.anthropic.com/en/docs/claude-code)
+[![Docs](https://img.shields.io/badge/Docs-Website-blue)](https://genomewalker.github.io/zellij-mcp/)
+[![Version](https://img.shields.io/github/v/release/genomewalker/zellij-mcp?label=version)](https://github.com/genomewalker/zellij-mcp/releases)
 
-### Quick Install
+---
+
+## Why zellij-mcp?
+
+**Orchestrate your terminal.** Claude creates panes, runs commands, and captures output—all from natural language.
+
+**35+ MCP tools.** Panes, tabs, floating windows, scrolling, screen capture, cross-session control.
+
+**Pairs with prism-nvim.** Open nvim in a pane via zellij-mcp, edit with prism-nvim, run tests in another pane.
+
+---
+
+## Install
 
 ```bash
 git clone https://github.com/genomewalker/zellij-mcp
@@ -12,87 +28,100 @@ cd zellij-mcp
 ./scripts/install.sh
 ```
 
-### Manual
+Then **restart Claude Code**.
 
-1. Clone the repository:
-```bash
-git clone https://github.com/genomewalker/zellij-mcp
-```
+---
 
-2. Install Python dependencies:
-```bash
-pip install mcp
-```
-
-3. Register the MCP server:
-```bash
-claude mcp add --transport stdio --scope user zellij-mcp -- python3 /path/to/zellij-mcp/server.py
-```
-
-4. Restart Claude Code
-
-## Requirements
-
-- [Zellij](https://zellij.dev/documentation/installation) installed
-- Python 3.8+ with `mcp` package
-- Claude Code running inside a Zellij session
-
-## Usage
-
-After installation, Claude Code can control your Zellij session:
+## Quick Start
 
 ```
-"Open nvim in a floating pane"
-"Create a new tab called 'tests'"
-"Run npm test in a split pane on the right"
-"Send 'git status' to the current pane"
+"open a floating pane with htop"
+"create a tab called tests"
+"run npm test in a split on the right"
+"send git status to the current pane"
 ```
+
+---
+
+## Natural Language
+
+| You say | What happens |
+|---------|--------------|
+| "new pane" | Creates pane |
+| "split right" | Pane to the right |
+| "floating pane" | Floating window |
+| "new tab called X" | Tab named X |
+| "go to tab 2" | Switches tab |
+| "run npm test" | Executes command |
+| "scroll up" | Scrolls pane |
+| "fullscreen" | Toggle fullscreen |
+
+---
 
 ## Tools
 
 ### Pane Management
-- `new_pane` - Create pane (floating, direction, command)
-- `close_pane` - Close focused pane
-- `focus_pane` - Move focus between panes
+- `new_pane` - Create pane (floating, direction, command, cwd)
+- `close_pane` / `focus_pane` / `resize_pane`
 - `toggle_floating` / `toggle_fullscreen`
-- `rename_pane` / `resize_pane`
 
 ### Tab Management
 - `new_tab` / `close_tab` / `focus_tab` / `rename_tab`
 
-### Commands
+### Commands & Input
 - `write_chars` - Send text to pane
 - `run_command` - Execute command (text + Enter)
 - `dump_screen` - Capture pane output to file
 
 ### Session
-- `list_sessions` / `session_info` / `dump_layout`
+- `session_info` / `list_sessions` / `dump_layout`
 
-## Safety When Running Inside Zellij
+---
+
+## Cross-Session Control
+
+All tools support `--session` to target other Zellij sessions:
+
+```
+list_sessions              # See available sessions
+run_command --session dev --command "git pull"
+dump_screen --session dev --path /tmp/output.txt
+```
+
+---
+
+## Safety Guidelines
 
 When Claude Code runs inside a Zellij pane:
 
-1. **Always specify your session** - Use `session_info` first, then pass `--session` on all commands
-2. **Never close your own pane** - Only close other panes you created
-3. **Create work in separate tabs** - Easier to manage and capture output
+1. **Always use `session_info` first** - Know your session name
+2. **Pass `--session` on commands** - Target the right session
+3. **Never close your own pane** - Only close panes you created
+4. **Create work in separate tabs** - Easier to manage
 
-See `.claude-plugin/CLAUDE.md` for detailed guidelines.
+See [CLAUDE.md](.claude-plugin/CLAUDE.md) for detailed guidelines.
+
+---
 
 ## Combining with prism-nvim
 
-For full development workflows:
-
-1. **zellij-mcp**: Opens nvim in a pane
-2. **prism-nvim**: Controls nvim (edit files, navigate, LSP)
-3. **zellij-mcp**: Opens test runner in another pane
+The ultimate development workflow:
 
 ```
-Claude: "Open nvim with main.ts, add error handling, then run the tests"
-→ new_pane(command="nvim src/main.ts")
-→ prism: edit_buffer(...)
-→ new_pane(direction="down", command="npm test")
+1. zellij-mcp: "open nvim in a floating pane"
+2. prism-nvim: "go to line 42, add error handling"
+3. zellij-mcp: "open a pane below and run the tests"
+4. zellij-mcp: "capture the test output"
 ```
 
-## License
+---
 
-MIT
+## Requirements
+
+- [Zellij](https://zellij.dev/documentation/installation) 0.40+
+- Python 3.8+ with `mcp` package
+- Claude Code running inside a Zellij session
+
+---
+
+MIT · [Website](https://genomewalker.github.io/zellij-mcp/) · [GitHub](https://github.com/genomewalker/zellij-mcp) · [Issues](https://github.com/genomewalker/zellij-mcp/issues)

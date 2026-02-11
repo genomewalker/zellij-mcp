@@ -1,0 +1,20 @@
+{
+  "name": "zellij-mcp",
+  "description": "Control Zellij terminal multiplexer from Claude Code. Open panes, run commands, orchestrate multi-pane workflows.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Antonio Fernandez-Guerra",
+    "url": "https://github.com/genomewalker"
+  },
+  "repository": "https://github.com/genomewalker/zellij-mcp",
+  "license": "MIT",
+  "keywords": [
+    "zellij",
+    "terminal",
+    "multiplexer",
+    "mcp",
+    "orchestration",
+    "panes",
+    "tabs"
+  ]
+}

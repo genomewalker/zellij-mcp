@@ -125,6 +125,60 @@ run_command --session other-session --command "git pull"
 2. Use prism-nvim tools to edit files in that nvim instance
 3. `new_pane --direction down --command "make test"` - Run tests
 
+## Running Inside Zellij (Claude Code in a pane)
+
+When Claude Code runs inside a Zellij pane, follow these rules:
+
+### Always specify your session
+```
+# Find your session name first
+session_info  # Returns {"session": "cc-soul", "pane_id": "0"}
+
+# Then use session parameter on all commands
+new_tab --session cc-soul --name "build"
+write_chars --session cc-soul --chars "make build"
+dump_screen --session cc-soul --path /tmp/output.txt
+```
+
+### Never close your own pane
+`close_pane` on the focused pane will detach/kill the session. Safe pattern:
+```
+# Create work in another tab
+new_tab --session cc-soul --name "work"
+
+# When done, go back to your tab first
+focus_tab --session cc-soul --name "Tab #1"  # or your tab name
+
+# Then close the work tab (NOT your own)
+close_tab --session cc-soul  # Only if you're NOT on that tab
+```
+
+### dump_screen captures the focused pane
+To capture output from another tab:
+```bash
+# Switch to the target tab, dump, then return
+zellij -s cc-soul action go-to-tab-name work && \
+  zellij -s cc-soul action dump-screen /tmp/output.txt && \
+  zellij -s cc-soul action go-to-tab-name "Tab #1"
+```
+
+### Recommended workflow for running commands
+```
+# 1. Create a dedicated tab
+new_tab --session cc-soul --name "task"
+
+# 2. Type and execute command
+write_chars --session cc-soul --chars "pdu ~"
+write_chars --session cc-soul --chars "\n"  # Press Enter
+
+# 3. Wait, then capture output
+# (use Bash: sleep 10)
+dump_screen --session cc-soul --path /tmp/result.txt --full true
+
+# 4. Read the output file
+# (use Read tool)
+```
+
 ## Natural Language Mapping
 
 | User says | Tool |

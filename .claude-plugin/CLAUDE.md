@@ -1,64 +1,145 @@
 # zellij-mcp
 
-Control Zellij terminal multiplexer from Claude Code.
+Control Zellij terminal multiplexer from Claude Code. All tools support cross-session targeting via the `session` parameter.
 
-## Tools
+## Cross-Session Support
+
+All tools accept an optional `session` parameter to target a different Zellij session:
+
+```
+new_pane --session other-session --command "htop"
+run_command --session other-session --command "git status"
+```
+
+Use `list_sessions` to discover available sessions.
+
+## Tools Reference
 
 ### Pane Management
-| Tool | Description |
-|------|-------------|
-| `new_pane` | Open pane (direction, floating, command, name, cwd) |
-| `close_pane` | Close focused pane |
-| `focus_pane` | Move focus (down/right/up/left) |
-| `toggle_floating` | Toggle floating pane mode |
-| `toggle_fullscreen` | Toggle fullscreen |
-| `rename_pane` | Rename current pane |
-| `resize_pane` | Resize pane (direction, amount) |
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `new_pane` | Create pane | `direction`, `floating`, `command`, `name`, `cwd`, `in_place`, `close_on_exit` |
+| `close_pane` | Close focused pane | |
+| `focus_pane` | Move focus | `direction` (down/right/up/left) |
+| `focus_next_pane` | Focus next pane | |
+| `focus_previous_pane` | Focus previous pane | |
+| `move_pane` | Move pane location | `direction` |
+| `move_pane_backwards` | Rotate pane backwards | |
+| `resize_pane` | Resize pane border | `direction`, `increase` (bool) |
+| `rename_pane` | Set pane name | `name` |
+| `undo_rename_pane` | Remove custom name | |
+| `toggle_floating` | Toggle floating panes | |
+| `toggle_fullscreen` | Toggle fullscreen | |
+| `toggle_embed_or_floating` | Toggle pane embed/float | |
+| `toggle_pane_frames` | Toggle UI frames | |
+| `toggle_sync_tab` | Send to all panes in tab | |
+| `stack_panes` | Stack panes together | `pane_ids` (array) |
 
 ### Tab Management
-| Tool | Description |
-|------|-------------|
-| `new_tab` | Create tab (name, layout, cwd) |
-| `close_tab` | Close current tab |
-| `focus_tab` | Switch tab (index or next/previous) |
-| `rename_tab` | Rename current tab |
 
-### Commands
-| Tool | Description |
-|------|-------------|
-| `write_chars` | Send characters to focused pane |
-| `write_command` | Send command + Enter to focused pane |
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `new_tab` | Create tab | `name`, `layout`, `cwd` |
+| `close_tab` | Close current tab | |
+| `focus_tab` | Switch tab | `index` (1-based), `name`, or `direction` (next/previous) |
+| `move_tab` | Move tab | `direction` (left/right) |
+| `rename_tab` | Set tab name | `name` |
+| `undo_rename_tab` | Remove custom name | |
+| `query_tab_names` | List all tab names | |
+
+### Scrolling
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `scroll` | Scroll in pane | `direction` (up/down), `amount` (line/half_page/page/top/bottom) |
+
+### Text/Commands
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `write_chars` | Send characters | `chars` |
+| `write_bytes` | Send raw bytes | `bytes` (array) |
+| `run_command` | Execute command | `command` (adds Enter) |
+| `clear_pane` | Clear pane buffers | |
+
+### Edit
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `edit_file` | Open file in editor pane | `path`, `line`, `floating`, `in_place`, `direction` |
+| `edit_scrollback` | Open scrollback in editor | |
 
 ### Session
-| Tool | Description |
-|------|-------------|
-| `list_sessions` | List all Zellij sessions |
-| `session_info` | Current session info |
-| `dump_layout` | Dump current layout |
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `list_sessions` | List all sessions | |
+| `list_clients` | List connected clients | |
+| `session_info` | Current session info | |
+| `rename_session` | Rename session | `name` |
+
+### Layout
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `dump_layout` | Export current layout | |
+| `dump_screen` | Dump pane to file | `path`, `full` (include scrollback) |
+| `swap_layout` | Cycle layouts | `direction` (next/previous) |
+
+### Mode
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `switch_mode` | Change input mode | `mode` (locked/pane/tab/resize/move/search/session/normal) |
+
+### Plugins
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `launch_plugin` | Launch Zellij plugin | `url`, `floating`, `in_place`, `skip_cache`, `configuration` |
+| `pipe` | Send data to plugins | `name`, `payload`, `plugin`, `args` |
 
 ## Common Workflows
 
-**Open nvim in a new pane:**
+### Open nvim in floating pane
 ```
-new_pane --floating --command "nvim"
-```
-
-**Run tests in split pane:**
-```
-new_pane --direction right --command "npm test"
+new_pane --floating --command "nvim src/main.ts"
 ```
 
-**Multi-pane development setup:**
+### Multi-pane development
 ```
 new_pane --direction right --name "server" --command "npm run dev"
 new_pane --direction down --name "tests"
-write_command --command "npm test --watch"
+run_command --command "npm test --watch"
 ```
 
-## With prism-nvim
+### Cross-session command
+```
+list_sessions
+run_command --session other-session --command "git pull"
+```
 
-When combined with prism-nvim, you can orchestrate full workflows:
+### With prism-nvim
+1. `new_pane --floating --command "nvim"` - Open nvim via zellij-mcp
+2. Use prism-nvim tools to edit files in that nvim instance
+3. `new_pane --direction down --command "make test"` - Run tests
 
-1. `new_pane --floating --command "nvim src/main.ts"` - Open nvim
-2. Use prism-nvim tools to edit the file
-3. `new_pane --direction down --command "npm test"` - Run tests
+## Natural Language Mapping
+
+| User says | Tool |
+|-----------|------|
+| "open a new pane" | `new_pane` |
+| "split right with htop" | `new_pane --direction right --command "htop"` |
+| "floating pane" | `new_pane --floating` |
+| "close this pane" | `close_pane` |
+| "focus left/right/up/down" | `focus_pane --direction <dir>` |
+| "fullscreen" | `toggle_fullscreen` |
+| "new tab called X" | `new_tab --name "X"` |
+| "go to tab 2" | `focus_tab --index 2` |
+| "run X" / "execute X" | `run_command --command "X"` |
+| "send X to other session" | `run_command --session other --command "X"` |
+| "list sessions" | `list_sessions` |
+| "scroll up/down" | `scroll --direction up/down` |
+| "scroll to top" | `scroll --direction up --amount top` |
+| "clear the screen" | `clear_pane` |

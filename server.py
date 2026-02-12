@@ -50,6 +50,19 @@ def get_active_sessions() -> list[str]:
 
 _agent_session_lock = threading.Lock()
 
+# Per-session locks for focus operations to prevent race conditions
+_focus_locks: dict[str, threading.Lock] = {}
+_focus_locks_lock = threading.Lock()
+
+
+def get_focus_lock(session: str = None) -> threading.Lock:
+    """Get or create a lock for focus operations on a session."""
+    key = session or os.environ.get("ZELLIJ_SESSION_NAME", "_default")
+    with _focus_locks_lock:
+        if key not in _focus_locks:
+            _focus_locks[key] = threading.Lock()
+        return _focus_locks[key]
+
 
 def ensure_agent_session() -> bool:
     """Ensure the agent session exists, create if needed. Thread-safe."""
@@ -170,6 +183,17 @@ REPL_PROMPTS: dict[str, str] = {
 # LAYOUT CACHE - Reduces redundant subprocess calls
 # =============================================================================
 
+def _resolve_session_key(session: str = None) -> str:
+    """Resolve session to a stable cache key, avoiding _default bleeding."""
+    if session:
+        return session
+    # Try to get from environment if not specified
+    env_session = os.environ.get("ZELLIJ_SESSION_NAME")
+    if env_session:
+        return env_session
+    return "_default"
+
+
 class LayoutCache:
     """Cache for dump-layout results with TTL to reduce subprocess calls."""
 
@@ -180,7 +204,7 @@ class LayoutCache:
 
     def get(self, session: str = None) -> Optional[str]:
         """Get cached layout if still valid."""
-        key = session or "_default"
+        key = _resolve_session_key(session)
         with self._lock:
             if key in self._cache:
                 ts, layout = self._cache[key]
@@ -190,13 +214,13 @@ class LayoutCache:
 
     def set(self, layout: str, session: str = None):
         """Cache a layout result."""
-        key = session or "_default"
+        key = _resolve_session_key(session)
         with self._lock:
             self._cache[key] = (time.time(), layout)
 
     def invalidate(self, session: str = None):
         """Invalidate cache for a session (call after mutations)."""
-        key = session or "_default"
+        key = _resolve_session_key(session)
         with self._lock:
             self._cache.pop(key, None)
 
@@ -290,18 +314,25 @@ def parse_layout_panes(layout_text: str) -> list[dict]:
     current_tab_index = 0
     tab_focused = False
     pane_index_in_tab = 0
-    in_floating = False
+    floating_depth = 0  # Track brace depth for floating_panes block
 
     for line in layout_text.split('\n'):
         stripped = line.strip()
 
-        # Track floating panes section
+        # Track floating panes section with brace depth
         if 'floating_panes' in stripped:
-            in_floating = True
+            floating_depth = 1
+            # Count opening braces on this line
+            floating_depth += stripped.count('{') - 1  # -1 because we start at 1
             continue
-        if in_floating and stripped.startswith('}'):
-            in_floating = False
-            continue
+        if floating_depth > 0:
+            floating_depth += stripped.count('{')
+            floating_depth -= stripped.count('}')
+            if floating_depth <= 0:
+                floating_depth = 0
+                continue
+
+        in_floating = floating_depth > 0
 
         # Match tab lines
         tab_match = re.search(r'tab\s+name="([^"]+)".*?(focus=true)?', line)
@@ -346,10 +377,8 @@ def parse_layout_panes(layout_text: str) -> list[dict]:
             if cwd_match:
                 pane_info["cwd"] = cwd_match.group(1)
 
-            # Only add panes that have useful info (command or name)
-            # or are in the focused tab (so we can navigate)
-            if pane_info.get("command") or pane_info.get("name") or tab_focused:
-                panes.append(pane_info)
+            # Include all panes to allow index-based navigation
+            panes.append(pane_info)
 
     return panes
 
@@ -431,6 +460,14 @@ async def with_pane_focus(pane_name: str, action_fn: Callable, session: str = No
     Returns:
         Result dict from action_fn, with focus restoration info
     """
+    # Acquire per-session lock to prevent concurrent focus operations
+    focus_lock = get_focus_lock(session)
+    with focus_lock:
+        return await _with_pane_focus_impl(pane_name, action_fn, session)
+
+
+async def _with_pane_focus_impl(pane_name: str, action_fn: Callable, session: str = None) -> dict:
+    """Internal implementation of with_pane_focus (called under lock)."""
     # Get current layout to find original focus and target pane
     layout_result = zellij_action("dump-layout", capture=True, session=session)
     if not layout_result.get("success"):
@@ -1542,7 +1579,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             read_result = await with_pane_focus(pane_name, do_read, session=session)
         else:
             read_result = await do_read()
-            pane_name = "default"
+            pane_name = "_focused"  # Use distinct key for focused pane
 
         if not read_result.get("success"):
             result = read_result
@@ -1551,13 +1588,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             lines = content.split('\n')
             current_count = len(lines)
 
+            # Use session-qualified key to avoid collisions between same pane names in different sessions
+            cursor_key = f"{_resolve_session_key(session)}:{pane_name}"
+
             if reset:
-                state.pane_cursors[pane_name] = current_count
+                state.pane_cursors[cursor_key] = current_count
                 result = {"success": True, "reset": True, "line_count": current_count}
             else:
-                cursor = state.pane_cursors.get(pane_name, 0)
+                cursor = state.pane_cursors.get(cursor_key, 0)
                 new_lines = lines[cursor:] if cursor < current_count else []
-                state.pane_cursors[pane_name] = current_count
+                state.pane_cursors[cursor_key] = current_count
                 result = {
                     "success": True,
                     "new_output": '\n'.join(new_lines),
@@ -1715,12 +1755,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return zellij_action("close-pane", session=session)
 
         close_result = await with_pane_focus(pane_name, do_close, session=session)
-        state.unregister_pane(pane_name)
 
-        # Check if close actually succeeded
+        # Check if close actually succeeded - unregister only on success
         if not close_result.get("success"):
             result = close_result
         else:
+            state.unregister_pane(pane_name)
             result = {"success": True, "closed": pane_name}
             layout_cache.invalidate(session)
 
@@ -1831,7 +1871,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         int_result = await with_pane_focus(pane_name, do_interrupt, session=session)
 
-        if not wait_for_prompt:
+        if not int_result.get("success"):
+            result = int_result
+        elif not wait_for_prompt:
             result = {"success": True, "interrupted": True}
         else:
             # Wait for prompt
@@ -1880,7 +1922,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         if tab:
             layout_result = zellij_action("dump-layout", capture=True, session=session)
-            if layout_result.get("success") and f'name="{tab}"' not in layout_result.get("stdout", ""):
+            if not layout_result.get("success"):
+                # Layout check failed, try to create tab anyway
+                zellij_action("new-tab", "--name", tab, session=session)
+            elif f'name="{tab}"' not in layout_result.get("stdout", ""):
                 zellij_action("new-tab", "--name", tab, session=session)
             else:
                 zellij_action("go-to-tab-name", tab, session=session)
@@ -1960,26 +2005,29 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return zellij_action("write-chars", cmd + "\n", session=session)
 
         write_result = await with_pane_focus(ssh_name, do_write, session=session)
-        await asyncio.sleep(2.0)
-
-        async def do_read():
-            return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
-
-        read_result = await with_pane_focus(ssh_name, do_read, session=session)
-
-        if read_result.get("success"):
-            content = strip_ansi(read_result.get("stdout", ""))
-            match = re.search(job_pattern, content)
-            if match:
-                job_id = match.group(1)
-                state.tracked_jobs[job_id] = TrackedJob(
-                    job_id=job_id, scheduler=scheduler, ssh_name=ssh_name, script=script
-                )
-                result = {"success": True, "job_id": job_id, "output": content[-500:]}
-            else:
-                result = {"success": False, "error": "Could not parse job ID", "output": content[-500:]}
+        if not write_result.get("success"):
+            result = write_result
         else:
-            result = read_result
+            await asyncio.sleep(2.0)
+
+            async def do_read():
+                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
+
+            read_result = await with_pane_focus(ssh_name, do_read, session=session)
+
+            if read_result.get("success"):
+                content = strip_ansi(read_result.get("stdout", ""))
+                match = re.search(job_pattern, content)
+                if match:
+                    job_id = match.group(1)
+                    state.tracked_jobs[job_id] = TrackedJob(
+                        job_id=job_id, scheduler=scheduler, ssh_name=ssh_name, script=script
+                    )
+                    result = {"success": True, "job_id": job_id, "output": content[-500:]}
+                else:
+                    result = {"success": False, "error": "Could not parse job ID", "output": content[-500:]}
+            else:
+                result = read_result
 
     elif name == "job_status":
         # Use agent session by default to avoid stealing focus

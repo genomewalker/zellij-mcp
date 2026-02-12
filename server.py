@@ -19,6 +19,59 @@ server = Server("zellij-mcp")
 
 
 # =============================================================================
+# AGENT SESSION - Isolated workspace for autonomous operations
+# =============================================================================
+
+AGENT_SESSION = "zellij-agent"  # Dedicated session for agent work
+
+
+def get_active_sessions() -> list[str]:
+    """Get list of active zellij session names."""
+    try:
+        result = subprocess.run(
+            ["zellij", "list-sessions", "-n"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return [s.strip() for s in result.stdout.strip().split('\n') if s.strip()]
+    except Exception:
+        pass
+    return []
+
+
+def ensure_agent_session() -> bool:
+    """Ensure the agent session exists, create if needed."""
+    sessions = get_active_sessions()
+    if AGENT_SESSION in sessions:
+        return True
+
+    # Create the agent session in detached mode
+    try:
+        result = subprocess.run(
+            ["zellij", "-s", AGENT_SESSION, "options", "--detached"],
+            capture_output=True, text=True, timeout=10
+        )
+        # Also try attach --create which works better
+        if result.returncode != 0:
+            subprocess.Popen(
+                ["zellij", "attach", "--create", AGENT_SESSION],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            time.sleep(1)  # Give it time to start
+        return AGENT_SESSION in get_active_sessions()
+    except Exception:
+        return False
+
+
+def get_agent_session() -> str:
+    """Get the agent session name, ensuring it exists."""
+    ensure_agent_session()
+    return AGENT_SESSION
+
+
+# =============================================================================
 # UTILITIES
 # =============================================================================
 
@@ -674,14 +727,26 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
-        # === COMPOUND OPERATIONS ===
+        # === AGENT SESSION ===
         Tool(
-            name="run_in_pane",
-            description="Run a command in a specific pane and optionally wait for completion with output capture",
+            name="agent_session",
+            description="Manage the isolated agent session (zellij-agent). Creates if needed. Returns session info.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "pane_name": {"type": "string", "description": "Target pane name"},
+                    "action": {"type": "string", "enum": ["status", "create", "destroy"],
+                               "description": "Action: status (default), create, or destroy", "default": "status"},
+                },
+            },
+        ),
+        # === COMPOUND OPERATIONS (run in agent session by default) ===
+        Tool(
+            name="run_in_pane",
+            description="Run command in a pane (agent session by default). No focus stealing - safe for autonomous use.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "Target pane name in agent session"},
                     "command": {"type": "string", "description": "Command to execute"},
                     "wait": {"type": "boolean", "description": "Wait for completion", "default": True},
                     "timeout": {"type": "integer", "description": "Max seconds to wait", "default": 30},
@@ -693,7 +758,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_named_pane",
-            description="Create a pane with a name (idempotent - returns existing if present)",
+            description="Create pane in agent session (isolated workspace). No focus stealing.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -709,7 +774,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="destroy_named_pane",
-            description="Close a named pane and remove from registry",
+            description="Close a named pane in agent session",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -720,7 +785,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="list_named_panes",
-            description="List all registered panes with their status",
+            description="List all registered panes in agent session",
             inputSchema={"type": "object", "properties": {}},
         ),
         # === REPL ===
@@ -1054,7 +1119,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result = zellij_action("clear", session=session)
 
     elif name == "read_pane":
+        # Use agent session by default when targeting named panes
         pane_name = arguments.get("pane_name")
+        if pane_name:
+            session = session or get_agent_session()
+
         do_strip = arguments.get("strip_ansi", True)
         tail_lines = arguments.get("tail")
 
@@ -1111,6 +1180,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     result = {"success": True, "message": "Pane is in current tab - use direction keys to navigate", "pane": target_pane}
 
     elif name == "write_to_pane":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         pane_name = arguments["pane_name"]
         chars = arguments["chars"]
         if arguments.get("press_enter"):
@@ -1122,9 +1194,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result = await with_pane_focus(pane_name, do_write, session=session)
 
     elif name == "send_keys":
+        # Use agent session by default when targeting named panes
+        pane_name = arguments.get("pane_name")
+        if pane_name:
+            session = session or get_agent_session()
+
         keys = arguments["keys"].lower()
         repeat = arguments.get("repeat", 1)
-        pane_name = arguments.get("pane_name")
 
         if keys not in KEY_SEQUENCES:
             result = {"success": False, "error": f"Unknown key: {keys}",
@@ -1142,9 +1218,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result = await do_send()
 
     elif name == "search_pane":
+        # Use agent session by default when targeting named panes
+        pane_name = arguments.get("pane_name")
+        if pane_name:
+            session = session or get_agent_session()
+
         pattern = arguments["pattern"]
         context = arguments.get("context", 0)
-        pane_name = arguments.get("pane_name")
 
         async def do_read():
             args = ["dump-screen", "/dev/stdout"]
@@ -1180,10 +1260,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # === MONITORING ===
     elif name == "wait_for_output":
+        # Use agent session by default when targeting named panes
+        pane_name = arguments.get("pane_name")
+        if pane_name:
+            session = session or get_agent_session()
+
         pattern = arguments["pattern"]
         timeout = arguments.get("timeout", 30)
         poll_interval = arguments.get("poll_interval", 1.0)
-        pane_name = arguments.get("pane_name")
 
         async def do_read():
             args = ["dump-screen", "/dev/stdout"]
@@ -1226,10 +1310,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             }
 
     elif name == "wait_for_idle":
+        # Use agent session by default when targeting named panes
+        pane_name = arguments.get("pane_name")
+        if pane_name:
+            session = session or get_agent_session()
+
         stable_seconds = arguments.get("stable_seconds", 3.0)
         timeout = arguments.get("timeout", 60)
         poll_interval = arguments.get("poll_interval", 1.0)
-        pane_name = arguments.get("pane_name")
 
         async def do_read():
             args = ["dump-screen", "/dev/stdout"]
@@ -1275,6 +1363,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     elif name == "tail_pane":
         pane_name = arguments.get("pane_name", "default")
+        # Use agent session by default when targeting named panes
+        if pane_name and pane_name != "default":
+            session = session or get_agent_session()
+
         reset = arguments.get("reset", False)
 
         async def do_read():
@@ -1309,6 +1401,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # === COMPOUND OPERATIONS ===
     elif name == "run_in_pane":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         pane_name = arguments["pane_name"]
         command = arguments["command"]
         wait = arguments.get("wait", True)
@@ -1357,6 +1452,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result["output"] = output
 
     elif name == "create_named_pane":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         pane_name = arguments["name"]
         command = arguments.get("command")
         tab = arguments.get("tab")
@@ -1416,6 +1514,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result = create_result
 
     elif name == "destroy_named_pane":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         pane_name = arguments["name"]
 
         async def do_close():
@@ -1426,6 +1527,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result = {"success": True, "closed": pane_name}
 
     elif name == "list_named_panes":
+        # Use agent session by default for named pane operations
+        session = session or get_agent_session()
+
         # Get live layout
         layout_result = zellij_action("dump-layout", capture=True, session=session)
         live_panes = []
@@ -1448,6 +1552,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # === REPL ===
     elif name == "repl_execute":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         pane_name = arguments["pane_name"]
         code = arguments["code"]
         repl_type = arguments.get("repl_type", "auto")
@@ -1513,6 +1620,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             }
 
     elif name == "repl_interrupt":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         pane_name = arguments["pane_name"]
         wait_for_prompt = arguments.get("wait_for_prompt", True)
         timeout = arguments.get("timeout", 10)
@@ -1549,6 +1659,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # === SSH/HPC ===
     elif name == "ssh_connect":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         ssh_name = arguments["name"]
         host = arguments["host"]
         tab = arguments.get("tab")
@@ -1584,6 +1697,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = create_result
 
     elif name == "ssh_run":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         ssh_name = arguments["name"]
         command = arguments["command"]
         wait = arguments.get("wait", True)
@@ -1621,6 +1737,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = {"success": True, "output": output, "elapsed": round(time.time() - start_time, 2)}
 
     elif name == "job_submit":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         ssh_name = arguments["ssh_name"]
         script = arguments["script"]
         scheduler = arguments.get("scheduler", "slurm")
@@ -1660,6 +1779,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = read_result
 
     elif name == "job_status":
+        # Use agent session by default to avoid stealing focus
+        session = session or get_agent_session()
+
         job_id = arguments.get("job_id")
         ssh_name = arguments.get("ssh_name")
 
@@ -1776,6 +1898,45 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if arguments.get("args"):
             args.extend(["--args", *arguments["args"]])
         result = zellij_action(*args, session=session)
+
+    # === AGENT SESSION ===
+    elif name == "agent_session":
+        action = arguments.get("action", "status")
+
+        if action == "create":
+            success = ensure_agent_session()
+            if success:
+                result = {
+                    "success": True,
+                    "session": AGENT_SESSION,
+                    "message": f"Agent session '{AGENT_SESSION}' is ready"
+                }
+            else:
+                result = {
+                    "success": False,
+                    "error": f"Failed to create agent session '{AGENT_SESSION}'"
+                }
+        elif action == "status":
+            sessions = get_active_sessions()
+            exists = AGENT_SESSION in sessions
+            result = {
+                "success": True,
+                "session": AGENT_SESSION,
+                "exists": exists,
+                "all_sessions": sessions
+            }
+        elif action == "destroy":
+            # Kill the agent session
+            try:
+                subprocess.run(
+                    ["zellij", "kill-session", AGENT_SESSION],
+                    capture_output=True, timeout=10
+                )
+                result = {"success": True, "destroyed": AGENT_SESSION}
+            except Exception as e:
+                result = {"success": False, "error": str(e)}
+        else:
+            result = {"success": False, "error": f"Unknown action: {action}"}
 
     else:
         result = {"success": False, "error": f"Unknown tool: {name}"}

@@ -1,14 +1,48 @@
 # zellij-mcp
 
-Autonomous Zellij control for Claude Code. 56 tools for pane management, output monitoring, REPL interaction, and SSH/HPC workflows.
+Autonomous Zellij control for Claude Code. 57 tools for pane management, output monitoring, REPL interaction, and SSH/HPC workflows.
 
 ## Key Features
 
+- **No focus stealing** - Agent works in isolated session, you keep working undisturbed
 - **Pane targeting** - Work with any pane by name, not just focused
 - **Output monitoring** - Wait for patterns, tail new output, search history
 - **REPL interaction** - Execute code in IPython/R/Julia, capture output
 - **SSH/HPC** - Manage SSH sessions, submit SLURM/PBS jobs
 - **Autonomous workflows** - Run commands and wait for completion
+
+## Agent Session Isolation
+
+By default, all autonomous operations run in a separate `zellij-agent` session. This means:
+- **You keep working** - Your current pane/tab focus is never stolen
+- **No visual interruption** - Agent panes don't appear in your session
+- **Full isolation** - Agent crashes don't affect your session
+
+The agent session is created automatically when needed.
+
+### Agent Session Tool
+
+| Tool | Description |
+|------|-------------|
+| `agent_session` | Manage the agent session. Params: `action` (create/status/destroy) |
+
+```python
+# Check agent session status
+agent_session(action="status")
+
+# Explicitly create (usually automatic)
+agent_session(action="create")
+
+# Destroy when done
+agent_session(action="destroy")
+```
+
+### Override Session
+
+To run in your current session instead (steals focus):
+```python
+create_named_pane(name="mywork", session="your-session-name")
+```
 
 ## Quick Start
 

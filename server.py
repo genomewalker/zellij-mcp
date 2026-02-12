@@ -8,6 +8,7 @@ import re
 import asyncio
 import time
 import hashlib
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -39,30 +40,35 @@ def get_active_sessions() -> list[str]:
     return []
 
 
-def ensure_agent_session() -> bool:
-    """Ensure the agent session exists, create if needed."""
-    sessions = get_active_sessions()
-    if AGENT_SESSION in sessions:
-        return True
+_agent_session_lock = threading.Lock()
 
-    # Create the agent session in detached mode
-    try:
-        result = subprocess.run(
-            ["zellij", "-s", AGENT_SESSION, "options", "--detached"],
-            capture_output=True, text=True, timeout=10
-        )
-        # Also try attach --create which works better
-        if result.returncode != 0:
-            subprocess.Popen(
-                ["zellij", "attach", "--create", AGENT_SESSION],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
+
+def ensure_agent_session() -> bool:
+    """Ensure the agent session exists, create if needed. Thread-safe."""
+    with _agent_session_lock:
+        sessions = get_active_sessions()
+        if AGENT_SESSION in sessions:
+            return True
+
+        # Create the agent session in detached mode
+        try:
+            result = subprocess.run(
+                ["zellij", "-s", AGENT_SESSION, "options", "--detached"],
+                capture_output=True, text=True, timeout=10
             )
-            time.sleep(1)  # Give it time to start
-        return AGENT_SESSION in get_active_sessions()
-    except Exception:
-        return False
+            # Also try attach --create which works better
+            if result.returncode != 0:
+                subprocess.Popen(
+                    ["zellij", "attach", "--create", AGENT_SESSION],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+                time.sleep(1)  # Give it time to start
+            # Re-check after creation
+            return AGENT_SESSION in get_active_sessions()
+        except Exception:
+            return False
 
 
 def get_agent_session() -> str:
@@ -153,6 +159,49 @@ REPL_PROMPTS: dict[str, str] = {
 
 
 # =============================================================================
+# LAYOUT CACHE - Reduces redundant subprocess calls
+# =============================================================================
+
+class LayoutCache:
+    """Cache for dump-layout results with TTL to reduce subprocess calls."""
+
+    def __init__(self, ttl: float = 0.5):
+        self._cache: dict[str, tuple[float, str]] = {}  # session -> (timestamp, layout)
+        self._ttl = ttl
+        self._lock = threading.Lock()
+
+    def get(self, session: str = None) -> Optional[str]:
+        """Get cached layout if still valid."""
+        key = session or "_default"
+        with self._lock:
+            if key in self._cache:
+                ts, layout = self._cache[key]
+                if time.time() - ts < self._ttl:
+                    return layout
+        return None
+
+    def set(self, layout: str, session: str = None):
+        """Cache a layout result."""
+        key = session or "_default"
+        with self._lock:
+            self._cache[key] = (time.time(), layout)
+
+    def invalidate(self, session: str = None):
+        """Invalidate cache for a session (call after mutations)."""
+        key = session or "_default"
+        with self._lock:
+            self._cache.pop(key, None)
+
+    def invalidate_all(self):
+        """Invalidate all cached layouts."""
+        with self._lock:
+            self._cache.clear()
+
+
+layout_cache = LayoutCache()
+
+
+# =============================================================================
 # SESSION STATE - In-memory registry for panes, SSH sessions, jobs
 # =============================================================================
 
@@ -188,9 +237,10 @@ class TrackedJob:
 
 
 class SessionState:
-    """Server-side state that persists across tool calls within a session."""
+    """Server-side state that persists across tool calls within a session. Thread-safe."""
 
     def __init__(self):
+        self._lock = threading.Lock()
         self.panes: dict[str, PaneInfo] = {}
         self.ssh_sessions: dict[str, SSHSession] = {}
         self.tracked_jobs: dict[str, TrackedJob] = {}
@@ -199,23 +249,26 @@ class SessionState:
 
     def register_pane(self, name: str, tab: str, command: str = None,
                       cwd: str = None, repl_type: str = None) -> PaneInfo:
-        """Register a named pane."""
+        """Register a named pane. Thread-safe."""
         pane = PaneInfo(name=name, tab=tab, command=command, cwd=cwd, repl_type=repl_type)
-        self.panes[name] = pane
+        with self._lock:
+            self.panes[name] = pane
         return pane
 
     def unregister_pane(self, name: str) -> bool:
-        """Remove a pane from registry."""
-        if name in self.panes:
-            del self.panes[name]
-            if name in self.pane_cursors:
-                del self.pane_cursors[name]
-            return True
-        return False
+        """Remove a pane from registry. Thread-safe."""
+        with self._lock:
+            if name in self.panes:
+                del self.panes[name]
+                if name in self.pane_cursors:
+                    del self.pane_cursors[name]
+                return True
+            return False
 
     def get_pane(self, name: str) -> Optional[PaneInfo]:
-        """Get registered pane info."""
-        return self.panes.get(name)
+        """Get registered pane info. Thread-safe."""
+        with self._lock:
+            return self.panes.get(name)
 
 
 # Global state instance
@@ -304,6 +357,57 @@ def find_pane_by_name(panes: list[dict], name: str) -> Optional[dict]:
     return None
 
 
+async def wait_for_prompt(
+    pane_name: str,
+    pattern: str,
+    timeout: float,
+    session: str = None,
+    poll_interval: float = 1.0,
+    check_lines: int = 5,
+) -> dict:
+    """
+    Wait for a prompt pattern to appear in pane output.
+
+    Common helper for run_in_pane, repl_execute, ssh_run, repl_interrupt.
+    Returns dict with success, completed, output, and elapsed.
+    """
+    async def do_read():
+        return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
+
+    start_time = time.time()
+    regex = re.compile(pattern)
+    output = ""
+
+    while time.time() - start_time < timeout:
+        if pane_name:
+            read_result = await with_pane_focus(pane_name, do_read, session=session)
+        else:
+            read_result = await do_read()
+
+        if read_result.get("success"):
+            content = strip_ansi(read_result.get("stdout", ""))
+            output = content
+            # Check last few lines for prompt
+            last_lines = '\n'.join(content.split('\n')[-check_lines:])
+            if regex.search(last_lines):
+                return {
+                    "success": True,
+                    "completed": True,
+                    "output": output,
+                    "elapsed": round(time.time() - start_time, 2),
+                }
+
+        await asyncio.sleep(poll_interval)
+
+    return {
+        "success": True,
+        "completed": False,
+        "output": output,
+        "elapsed": round(time.time() - start_time, 2),
+        "timeout": True,
+    }
+
+
 async def with_pane_focus(pane_name: str, action_fn: Callable, session: str = None) -> dict:
     """
     Execute action_fn while the named pane is focused, then restore focus.
@@ -350,9 +454,17 @@ async def with_pane_focus(pane_name: str, action_fn: Callable, session: str = No
     if not target_pane.get("focused"):
         # Cycle through panes to find the one with matching name/command
         max_cycles = 20  # Prevent infinite loop
+        found = False
         for _ in range(max_cycles):
-            # Check current focused pane
-            check_result = zellij_action("dump-layout", capture=True, session=session)
+            # Check current focused pane (use cache if available)
+            cached_layout = layout_cache.get(session)
+            if cached_layout:
+                check_result = {"success": True, "stdout": cached_layout}
+            else:
+                check_result = zellij_action("dump-layout", capture=True, session=session)
+                if check_result.get("success"):
+                    layout_cache.set(check_result.get("stdout", ""), session)
+
             if check_result.get("success"):
                 current_panes = parse_layout_panes(check_result.get("stdout", ""))
                 for p in current_panes:
@@ -360,12 +472,18 @@ async def with_pane_focus(pane_name: str, action_fn: Callable, session: str = No
                         # Check if this is our target
                         if (p.get("name") == target_pane.get("name") and target_pane.get("name")) or \
                            (p.get("command") == target_pane.get("command") and target_pane.get("command")):
+                            found = True
                             break
-                else:
-                    # Not found, cycle to next pane
-                    zellij_action("focus-next-pane", session=session)
-                    continue
+                        break  # Found focused pane but not target, continue cycling
+
+            if found:
                 break
+            # Cycle to next pane (invalidate cache as focus changes)
+            zellij_action("focus-next-pane", session=session)
+            layout_cache.invalidate(session)
+
+        if not found:
+            return {"success": False, "error": f"Could not focus pane '{pane_name}' after {max_cycles} cycles"}
 
     # Execute the action
     try:
@@ -404,9 +522,36 @@ def run_zellij(*args: str, capture: bool = False, session: str = None) -> dict[s
         return {"success": False, "error": str(e)}
 
 
+# Actions that mutate layout and should invalidate cache
+LAYOUT_MUTATING_ACTIONS = {
+    "new-pane", "close-pane", "new-tab", "close-tab", "rename-pane",
+    "rename-tab", "move-pane", "move-pane-backwards", "toggle-floating-panes",
+    "toggle-pane-embed-or-floating", "focus-next-pane", "focus-previous-pane",
+    "move-focus", "go-to-tab", "go-to-tab-name", "go-to-next-tab", "go-to-previous-tab",
+}
+
+
 def zellij_action(*args: str, capture: bool = False, session: str = None) -> dict[str, Any]:
     """Run a zellij action command, optionally targeting a specific session."""
-    return run_zellij("action", *args, capture=capture, session=session)
+    action_name = args[0] if args else ""
+
+    # Use cache for dump-layout reads
+    if action_name == "dump-layout" and capture:
+        cached = layout_cache.get(session)
+        if cached is not None:
+            return {"success": True, "stdout": cached, "stderr": ""}
+
+    result = run_zellij("action", *args, capture=capture, session=session)
+
+    # Cache dump-layout results
+    if action_name == "dump-layout" and capture and result.get("success"):
+        layout_cache.set(result.get("stdout", ""), session)
+
+    # Invalidate cache after layout-mutating actions
+    if action_name in LAYOUT_MUTATING_ACTIONS:
+        layout_cache.invalidate(session)
+
+    return result
 
 
 # Common schema for session targeting
@@ -1351,6 +1496,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         start_time = time.time()
         last_hash = None
         stable_since = None
+        # Initialize result for safety (handles case where all reads fail)
+        result = {"success": False, "error": "Timeout waiting for idle", "timeout": True}
 
         while time.time() - start_time < timeout:
             if pane_name:
@@ -1387,9 +1534,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             }
 
     elif name == "tail_pane":
-        pane_name = arguments.get("pane_name", "default")
+        pane_name = arguments.get("pane_name")
         # Use agent session by default when targeting named panes
-        if pane_name and pane_name != "default":
+        if pane_name:
             session = session or get_agent_session()
 
         reset = arguments.get("reset", False)
@@ -1479,6 +1626,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     elif name == "create_named_pane":
         # Use agent session by default to avoid stealing focus
         session = session or get_agent_session()
+        # Invalidate cache since we may mutate layout
+        layout_cache.invalidate(session)
 
         pane_name = arguments["name"]
         command = arguments.get("command")
@@ -1486,6 +1635,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         direction = arguments.get("direction")
         floating = arguments.get("floating", False)
         cwd = arguments.get("cwd")
+
+        result = None  # Initialize to catch unexpected states
 
         # Check if pane already exists
         existing = state.get_pane(pane_name)
@@ -1500,6 +1651,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 else:
                     state.unregister_pane(pane_name)
                     existing = None
+            else:
+                # Layout check failed, can't verify - assume stale and recreate
+                state.unregister_pane(pane_name)
+                existing = None
 
         if not existing:
             # Create the tab if needed
@@ -1546,12 +1701,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 )
                 result = {"success": True, "created": True, "pane": pane_info.__dict__,
                           "direction": direction}
+                # Invalidate cache after pane creation
+                layout_cache.invalidate(session)
             else:
                 result = create_result
+
+        # Safety check for unexpected state
+        if result is None:
+            result = {"success": False, "error": "Unexpected state in create_named_pane"}
 
     elif name == "destroy_named_pane":
         # Use agent session by default to avoid stealing focus
         session = session or get_agent_session()
+        # Invalidate cache since we're mutating layout
+        layout_cache.invalidate(session)
 
         pane_name = arguments["name"]
 
@@ -1560,7 +1723,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         close_result = await with_pane_focus(pane_name, do_close, session=session)
         state.unregister_pane(pane_name)
-        result = {"success": True, "closed": pane_name}
+
+        # Check if close actually succeeded
+        if not close_result.get("success"):
+            result = close_result
+        else:
+            result = {"success": True, "closed": pane_name}
+            layout_cache.invalidate(session)
 
     elif name == "list_named_panes":
         # Use agent session by default for named pane operations
@@ -1743,36 +1912,38 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         wait = arguments.get("wait", True)
         timeout = arguments.get("timeout", 30)
 
-        # Delegate to run_in_pane
-        arguments["pane_name"] = ssh_name
-        # Re-call with run_in_pane logic
-        async def do_write():
-            return zellij_action("write-chars", command + "\n", session=session)
-
-        write_result = await with_pane_focus(ssh_name, do_write, session=session)
-        if not write_result.get("success"):
-            result = write_result
-        elif not wait:
-            result = {"success": True, "sent": True}
+        # Validate SSH session exists
+        if ssh_name not in state.ssh_sessions:
+            result = {"success": False, "error": f"SSH session '{ssh_name}' not found. Use ssh_connect first."}
         else:
-            await asyncio.sleep(0.5)
+            # Execute command in SSH pane
+            async def do_write():
+                return zellij_action("write-chars", command + "\n", session=session)
 
-            async def do_read():
-                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
+            write_result = await with_pane_focus(ssh_name, do_write, session=session)
+            if not write_result.get("success"):
+                result = write_result
+            elif not wait:
+                result = {"success": True, "sent": True}
+            else:
+                await asyncio.sleep(0.5)
 
-            start_time = time.time()
-            output = ""
+                async def do_read():
+                    return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
 
-            while time.time() - start_time < timeout:
-                read_result = await with_pane_focus(ssh_name, do_read, session=session)
-                if read_result.get("success"):
-                    content = strip_ansi(read_result.get("stdout", ""))
-                    output = content
-                    if re.search(r"[\$#>]\s*$", content.split('\n')[-1] if content else ""):
-                        break
-                await asyncio.sleep(1.0)
+                start_time = time.time()
+                output = ""
 
-            result = {"success": True, "output": output, "elapsed": round(time.time() - start_time, 2)}
+                while time.time() - start_time < timeout:
+                    read_result = await with_pane_focus(ssh_name, do_read, session=session)
+                    if read_result.get("success"):
+                        content = strip_ansi(read_result.get("stdout", ""))
+                        output = content
+                        if re.search(r"[\$#>]\s*$", content.split('\n')[-1] if content else ""):
+                            break
+                    await asyncio.sleep(1.0)
+
+                result = {"success": True, "output": output, "elapsed": round(time.time() - start_time, 2)}
 
     elif name == "job_submit":
         # Use agent session by default to avoid stealing focus
@@ -1827,9 +1998,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if job_id:
             if job_id in state.tracked_jobs:
                 jobs_to_check.append(state.tracked_jobs[job_id])
-            else:
+            elif ssh_name:
+                # Untracked job with provided ssh_name - create temporary tracker
                 jobs_to_check.append(TrackedJob(job_id=job_id, scheduler="slurm",
-                                                ssh_name=ssh_name or "", script=""))
+                                                ssh_name=ssh_name, script=""))
+            else:
+                # Can't check untracked job without ssh_name
+                result = {"success": False, "error": f"Job '{job_id}' not found in tracker. Provide ssh_name to check untracked jobs."}
+                jobs_to_check = []  # Skip the loop
         else:
             jobs_to_check = list(state.tracked_jobs.values())
 
@@ -1863,7 +2039,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             else:
                 statuses.append({"job_id": job.job_id, "error": "Failed to read"})
 
-        result = {"success": True, "jobs": statuses}
+        # Set result only if we processed jobs (error case already set result above)
+        if jobs_to_check or statuses:
+            result = {"success": True, "jobs": statuses}
 
     # === EDIT ===
     elif name == "edit_file":
@@ -1989,5 +2167,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())

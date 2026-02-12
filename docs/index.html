@@ -10,12 +10,11 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
-  --phosphor: #39ff14;
-  --phosphor-dim: #1a7a0a;
-  --phosphor-glow: rgba(57, 255, 20, 0.15);
-  --phosphor-bright: #7fff5c;
-  --amber: #ffbf00;
-  --amber-dim: #8a6600;
+  --orange: #f97316;
+  --orange-dim: #9a4a0f;
+  --orange-glow: rgba(249, 115, 22, 0.2);
+  --orange-bright: #fb923c;
+  --green: #22c55e;
   --cyan: #00d4ff;
   --red: #ff3366;
   --bg-deep: #050505;
@@ -70,10 +69,10 @@ body::after {
   z-index: 9999;
 }
 
-::selection { background: var(--phosphor); color: #000; }
+::selection { background: var(--orange); color: #000; }
 
-a { color: var(--phosphor); text-decoration: none; transition: all 0.2s; }
-a:hover { color: var(--phosphor-bright); text-shadow: 0 0 10px var(--phosphor-glow); }
+a { color: var(--orange); text-decoration: none; transition: all 0.2s; }
+a:hover { color: var(--orange-bright); text-shadow: 0 0 10px var(--orange-glow); }
 
 /* Header - Terminal Tab Bar Style */
 header {
@@ -106,7 +105,7 @@ header {
 
 .header-tab.active {
   background: var(--bg-elevated);
-  color: var(--phosphor);
+  color: var(--orange);
 }
 
 .header-tab.active::after {
@@ -116,8 +115,8 @@ header {
   left: 0;
   right: 0;
   height: 2px;
-  background: var(--phosphor);
-  box-shadow: 0 0 10px var(--phosphor-glow);
+  background: var(--orange);
+  box-shadow: 0 0 10px var(--orange-glow);
 }
 
 .header-tab .dot {
@@ -127,7 +126,7 @@ header {
   background: var(--text-dim);
 }
 
-.header-tab.active .dot { background: var(--phosphor); box-shadow: 0 0 6px var(--phosphor); }
+.header-tab.active .dot { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
 
 .header-spacer { flex: 1; }
 
@@ -144,8 +143,8 @@ header {
 
 .status-item { display: flex; align-items: center; gap: 6px; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; }
-.status-dot.green { background: var(--phosphor); box-shadow: 0 0 6px var(--phosphor); }
-.status-dot.amber { background: var(--amber); }
+.status-dot.green { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+.status-dot.amber { background: var(--green); }
 
 .gh-btn {
   display: flex;
@@ -199,11 +198,11 @@ main {
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  background: rgba(57, 255, 20, 0.08);
-  border: 1px solid var(--phosphor-dim);
+  background: rgba(249, 115, 22, 0.08);
+  border: 1px solid var(--orange-dim);
   border-radius: 4px;
   font-size: 11px;
-  color: var(--phosphor);
+  color: var(--orange);
   margin-bottom: 32px;
   width: fit-content;
 }
@@ -212,7 +211,7 @@ main {
   content: "";
   width: 6px;
   height: 6px;
-  background: var(--phosphor);
+  background: var(--orange);
   border-radius: 50%;
   animation: pulse-dot 2s infinite;
 }
@@ -233,8 +232,8 @@ main {
 }
 
 .hero-title span {
-  color: var(--phosphor);
-  text-shadow: 0 0 30px var(--phosphor-glow), 0 0 60px var(--phosphor-glow);
+  color: var(--orange);
+  text-shadow: 0 0 30px var(--orange-glow), 0 0 60px var(--orange-glow);
 }
 
 .hero-sub {
@@ -253,7 +252,7 @@ main {
   margin-bottom: 40px;
 }
 
-.hero-desc strong { color: var(--phosphor); font-weight: 500; }
+.hero-desc strong { color: var(--orange); font-weight: 500; }
 
 .hero-stats {
   display: flex;
@@ -272,8 +271,8 @@ main {
   font-family: var(--display);
   font-size: 32px;
   font-weight: 700;
-  color: var(--phosphor);
-  text-shadow: 0 0 20px var(--phosphor-glow);
+  color: var(--orange);
+  text-shadow: 0 0 20px var(--orange-glow);
 }
 
 .stat-label {
@@ -311,7 +310,7 @@ main {
   right: 88px;
   width: 6px;
   height: 6px;
-  background: var(--phosphor);
+  background: var(--orange);
   border-radius: 50%;
   animation: pulse-dot 1.5s infinite;
 }
@@ -361,37 +360,37 @@ main {
   background: var(--text-dim);
 }
 
-.pane-indicator.active { background: var(--phosphor); box-shadow: 0 0 6px var(--phosphor); }
-.pane-indicator.amber { background: var(--amber); }
+.pane-indicator.active { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+.pane-indicator.amber { background: var(--green); }
 
 /* Active pane glow effect */
 .term-pane.active-pane {
-  border: 1px solid var(--phosphor) !important;
-  box-shadow: inset 0 0 30px rgba(57, 255, 20, 0.1), 0 0 20px rgba(57, 255, 20, 0.15);
+  border: 1px solid var(--orange) !important;
+  box-shadow: inset 0 0 30px rgba(249, 115, 22, 0.15), 0 0 20px rgba(249, 115, 22, 0.2);
 }
 
 .term-pane.active-pane .pane-header {
-  border-bottom-color: var(--phosphor-dim);
+  border-bottom-color: var(--orange-dim);
 }
 
 .term-pane.active-pane .pane-title {
-  color: var(--phosphor);
+  color: var(--orange);
 }
 
 .term-line { margin-bottom: 4px; line-height: 1.5; }
-.term-prompt { color: var(--phosphor); }
+.term-prompt { color: var(--orange); }
 .term-cmd { color: var(--white); }
 .term-output { color: var(--text); }
-.term-success { color: var(--phosphor); }
+.term-success { color: var(--orange); }
 .term-info { color: var(--cyan); }
-.term-warn { color: var(--amber); }
+.term-warn { color: var(--green); }
 .term-dim { color: var(--text-dim); }
 
 .term-cursor {
   display: inline-block;
   width: 8px;
   height: 14px;
-  background: var(--phosphor);
+  background: var(--orange);
   animation: blink 1s step-end infinite;
   vertical-align: middle;
   margin-left: 2px;
@@ -401,16 +400,75 @@ main {
 
 /* Session Map Mini */
 .session-map {
-  font-size: 10px;
-  line-height: 1.4;
-  color: var(--text-dim);
-  margin-top: 12px;
-  padding: 10px;
-  background: rgba(0,0,0,0.3);
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
   border-radius: 4px;
 }
 
-.session-map .highlight { color: var(--phosphor); }
+.session-map-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+
+.session-map-header .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--orange);
+  box-shadow: 0 0 6px var(--orange);
+}
+
+.session-map-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.map-pane {
+  padding: 8px 10px;
+  background: var(--bg-pane);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-size: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.map-pane.active {
+  border-color: var(--orange);
+  box-shadow: 0 0 8px rgba(249, 115, 22, 0.2);
+}
+
+.map-pane .name {
+  color: var(--text-bright);
+  font-weight: 500;
+}
+
+.map-pane.active .name {
+  color: var(--orange);
+}
+
+.map-pane .status {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.map-pane.active .status {
+  color: var(--green);
+}
 
 /* Install Section */
 .install-section {
@@ -437,7 +495,7 @@ main {
 
 .section-label {
   font-size: 10px;
-  color: var(--phosphor);
+  color: var(--orange);
   text-transform: uppercase;
   letter-spacing: 2px;
   margin-bottom: 16px;
@@ -495,7 +553,7 @@ main {
 
 .code-block code {
   flex: 1;
-  color: var(--phosphor);
+  color: var(--orange);
   font-size: 13px;
 }
 
@@ -513,8 +571,8 @@ main {
 }
 
 .code-block .copy-btn:hover {
-  border-color: var(--phosphor);
-  color: var(--phosphor);
+  border-color: var(--orange);
+  color: var(--orange);
 }
 
 /* Features Grid */
@@ -567,7 +625,7 @@ main {
   left: 0;
   width: 2px;
   height: 0;
-  background: var(--phosphor);
+  background: var(--orange);
   transition: height 0.3s;
 }
 
@@ -636,7 +694,7 @@ main {
 
 .tool-category h4 {
   font-size: 10px;
-  color: var(--phosphor);
+  color: var(--orange);
   text-transform: uppercase;
   letter-spacing: 1px;
   margin-bottom: 16px;
@@ -661,7 +719,7 @@ main {
 .tool-item:last-child { border-bottom: none; }
 
 .tool-item:hover {
-  color: var(--phosphor);
+  color: var(--orange);
   padding-left: 8px;
 }
 
@@ -746,7 +804,7 @@ footer {
   color: var(--white);
 }
 
-.footer-logo span { color: var(--phosphor); }
+.footer-logo span { color: var(--orange); }
 
 .footer-links {
   display: flex;
@@ -758,7 +816,7 @@ footer {
   color: var(--text);
 }
 
-.footer-links a:hover { color: var(--phosphor); }
+.footer-links a:hover { color: var(--orange); }
 
 .footer-right {
   font-size: 11px;
@@ -884,13 +942,29 @@ footer {
             <div class="term-line" id="tool-line" style="display:none;"><span class="term-dim">→</span> <span class="term-info" id="tool-call"></span></div>
           </div>
           <div class="session-map" id="session-map" style="display:none;">
-<span class="term-dim">┌─ zellij-agent ──────────────┐</span>
-<span class="term-dim">│ Tab: agents                 │</span>
-<span class="term-dim">│ ┌─────────┬─────────┐       │</span>
-<span class="term-dim">│ │</span> <span class="highlight">ipython</span> <span class="term-dim">│ worker1 │       │</span>
-<span class="term-dim">│ │ ACTIVE  │ idle    │       │</span>
-<span class="term-dim">│ └─────────┴─────────┘       │</span>
-<span class="term-dim">└─────────────────────────────┘</span>
+            <div class="session-map-header">
+              <span class="dot"></span>
+              <span>zellij-agent</span>
+              <span style="margin-left: auto; color: var(--orange);">Tab: agents</span>
+            </div>
+            <div class="session-map-grid">
+              <div class="map-pane active">
+                <span class="name">ipython</span>
+                <span class="status">active</span>
+              </div>
+              <div class="map-pane">
+                <span class="name">ssh:hpc</span>
+                <span class="status">idle</span>
+              </div>
+              <div class="map-pane">
+                <span class="name">worker1</span>
+                <span class="status">idle</span>
+              </div>
+              <div class="map-pane">
+                <span class="name">worker2</span>
+                <span class="status">idle</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1061,7 +1135,7 @@ footer {
       <span class="section-label">Workflow</span>
       <h2 class="section-title">Agent Isolation</h2>
       <p style="color: var(--text); margin-top: 16px; line-height: 1.8;">
-        By default, all autonomous operations run in a separate <code style="color: var(--phosphor);">zellij-agent</code> session.
+        By default, all autonomous operations run in a separate <code style="color: var(--orange);">zellij-agent</code> session.
         Claude creates panes, runs commands, monitors output—completely invisible to your active workspace.
       </p>
       <div class="workflow-example">
@@ -1253,9 +1327,9 @@ function runDemo() {
       ipyContent2.innerHTML = `
         <div class="term-line"><span class="term-info">In [2]:</span> <span class="term-cmd">df.describe()</span></div>
         <div class="term-line" style="color:var(--text-dim)">Out[2]:</div>
-        <div class="term-line" style="color:var(--phosphor)">       count   mean    std</div>
-        <div class="term-line" style="color:var(--phosphor)">col_a  1000   45.2   12.3</div>
-        <div class="term-line" style="color:var(--phosphor)">col_b  1000   78.9   23.1</div>
+        <div class="term-line" style="color:var(--orange)">       count   mean    std</div>
+        <div class="term-line" style="color:var(--orange)">col_a  1000   45.2   12.3</div>
+        <div class="term-line" style="color:var(--orange)">col_b  1000   78.9   23.1</div>
         <div class="term-line">&nbsp;</div>
         <div class="term-line"><span class="term-info">In [3]:</span> <span class="term-cursor"></span></div>
       `;
@@ -1268,8 +1342,8 @@ function runDemo() {
       const sshContent = document.getElementById('ssh-content');
       sshTitle.textContent = 'ssh:hpc';
       sshContent.innerHTML = `
-        <div class="term-line" style="color:var(--amber)">Connecting to cluster.edu...</div>
-        <div class="term-line" style="color:var(--phosphor)">Authentication successful</div>
+        <div class="term-line" style="color:var(--green)">Connecting to cluster.edu...</div>
+        <div class="term-line" style="color:var(--orange)">Authentication successful</div>
         <div class="term-line">&nbsp;</div>
         <div class="term-line"><span class="term-prompt">user@hpc:~$</span> <span class="term-cursor"></span></div>
       `;
@@ -1282,8 +1356,8 @@ function runDemo() {
       sshContent2.innerHTML = `
         <div class="term-line"><span class="term-prompt">user@hpc:~$</span> <span class="term-cmd">squeue -u $USER</span></div>
         <div class="term-line" style="color:var(--text-dim)">JOBID   NAME      STATE    TIME</div>
-        <div class="term-line" style="color:var(--phosphor)">84521   analysis  RUNNING  2:34:12</div>
-        <div class="term-line" style="color:var(--amber)">84522   preproc   PENDING  0:00:00</div>
+        <div class="term-line" style="color:var(--orange)">84521   analysis  RUNNING  2:34:12</div>
+        <div class="term-line" style="color:var(--green)">84522   preproc   PENDING  0:00:00</div>
         <div class="term-line">&nbsp;</div>
         <div class="term-line"><span class="term-prompt">user@hpc:~$</span> <span class="term-cursor"></span></div>
       `;

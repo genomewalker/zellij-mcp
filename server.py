@@ -1731,35 +1731,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         elif not wait:
             result = {"success": True, "message": "Command sent", "wait": False}
         else:
-            # Wait for prompt
+            # Wait for prompt using shared helper
             await asyncio.sleep(0.5)  # Initial delay
-
-            async def do_read():
-                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
-
-            start_time = time.time()
-            regex = re.compile(prompt_pattern)
-            output = ""
-
-            while time.time() - start_time < timeout:
-                read_result = await with_pane_focus(pane_name, do_read, session=session)
-                if read_result.get("success"):
-                    content = strip_ansi(read_result.get("stdout", ""))
-                    output = content
-                    # Check last few lines for prompt
-                    last_lines = '\n'.join(content.split('\n')[-5:])
-                    if regex.search(last_lines):
-                        break
-                await asyncio.sleep(1.0)
-
-            elapsed = time.time() - start_time
+            wait_result = await wait_for_prompt(
+                pane_name, prompt_pattern, timeout, session=session, check_lines=5
+            )
             result = {
                 "success": True,
-                "completed": elapsed < timeout,
-                "elapsed": round(elapsed, 2),
+                "completed": wait_result.get("completed", False),
+                "elapsed": wait_result.get("elapsed", 0),
             }
             if capture:
-                result["output"] = output
+                result["output"] = wait_result.get("output", "")
 
     elif name == "create_named_pane":
         # Use agent session by default to avoid stealing focus
@@ -1950,30 +1933,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if not write_result.get("success"):
             result = write_result
         else:
-            # Wait for prompt
+            # Wait for prompt using shared helper
             await asyncio.sleep(0.5)
-
-            async def do_read():
-                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
-
-            start_time = time.time()
-            regex = re.compile(prompt_pattern)
-            output = ""
-
-            while time.time() - start_time < timeout:
-                read_result = await with_pane_focus(pane_name, do_read, session=session)
-                if read_result.get("success"):
-                    content = strip_ansi(read_result.get("stdout", ""))
-                    output = content
-                    last_lines = '\n'.join(content.split('\n')[-3:])
-                    if regex.search(last_lines):
-                        break
-                await asyncio.sleep(1.0)
-
+            wait_result = await wait_for_prompt(
+                pane_name, prompt_pattern, timeout, session=session, check_lines=3
+            )
             result = {
                 "success": True,
-                "completed": time.time() - start_time < timeout,
-                "output": output,
+                "completed": wait_result.get("completed", False),
+                "output": wait_result.get("output", ""),
                 "repl_type": repl_type,
             }
 
@@ -1982,7 +1950,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         session = session or get_agent_session()
 
         pane_name = arguments["pane_name"]
-        wait_for_prompt = arguments.get("wait_for_prompt", True)
+        should_wait = arguments.get("wait_for_prompt", True)
         timeout = arguments.get("timeout", 10)
 
         # Send Ctrl+C
@@ -1993,29 +1961,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         if not int_result.get("success"):
             result = int_result
-        elif not wait_for_prompt:
+        elif not should_wait:
             result = {"success": True, "interrupted": True}
         else:
-            # Wait for prompt
+            # Wait for prompt using shared helper
             await asyncio.sleep(0.3)
-
-            async def do_read():
-                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
-
-            start_time = time.time()
-            prompt_found = False
-
-            while time.time() - start_time < timeout:
-                read_result = await with_pane_focus(pane_name, do_read, session=session)
-                if read_result.get("success"):
-                    content = strip_ansi(read_result.get("stdout", ""))
-                    last_lines = '\n'.join(content.split('\n')[-3:])
-                    if re.search(REPL_PROMPTS["default"], last_lines):
-                        prompt_found = True
-                        break
-                await asyncio.sleep(0.5)
-
-            result = {"success": True, "interrupted": True, "prompt_returned": prompt_found}
+            prompt_result = await wait_for_prompt(
+                pane_name, REPL_PROMPTS["default"], timeout, session=session, check_lines=3, poll_interval=0.5
+            )
+            result = {"success": True, "interrupted": True, "prompt_returned": prompt_result.get("completed", False)}
 
     # === SSH/HPC ===
     elif name == "ssh_connect":
@@ -2086,24 +2040,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif not wait:
                 result = {"success": True, "sent": True}
             else:
+                # Wait for prompt using shared helper
                 await asyncio.sleep(0.5)
-
-                async def do_read():
-                    return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
-
-                start_time = time.time()
-                output = ""
-
-                while time.time() - start_time < timeout:
-                    read_result = await with_pane_focus(ssh_name, do_read, session=session)
-                    if read_result.get("success"):
-                        content = strip_ansi(read_result.get("stdout", ""))
-                        output = content
-                        if re.search(r"[\$#>]\s*$", content.split('\n')[-1] if content else ""):
-                            break
-                    await asyncio.sleep(1.0)
-
-                result = {"success": True, "output": output, "elapsed": round(time.time() - start_time, 2)}
+                wait_result = await wait_for_prompt(
+                    ssh_name, r"[\$#>]\s*$", timeout, session=session, check_lines=1
+                )
+                result = {
+                    "success": True,
+                    "output": wait_result.get("output", ""),
+                    "elapsed": wait_result.get("elapsed", 0),
+                }
 
     elif name == "job_submit":
         # Use agent session by default to avoid stealing focus

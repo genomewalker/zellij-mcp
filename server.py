@@ -143,10 +143,17 @@ def plugin_command(cmd: str, payload: dict = None, timeout: float = 5.0) -> dict
     plugin_url = f"file://{_plugin_path_cache}"
     payload_json = json.dumps(payload) if payload else "{}"
 
+    # Escape single quotes in payload for bash
+    payload_escaped = payload_json.replace("'", "'\\''")
+
     try:
+        # Use bash -c with explicit echo pipe - this works reliably
+        # whereas subprocess stdin piping has issues with zellij
+        bash_cmd = f"echo '{payload_escaped}' | zellij pipe -p '{plugin_url}' -n {cmd}"
         result = subprocess.run(
-            ["zellij", "pipe", "-p", plugin_url, "-n", cmd, "--", payload_json],
-            capture_output=True, text=True, timeout=timeout
+            ["bash", "-c", bash_cmd],
+            capture_output=True, text=True, timeout=timeout,
+            env=os.environ.copy()  # Ensure env vars are passed
         )
 
         # Try to parse response JSON

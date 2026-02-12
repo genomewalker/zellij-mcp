@@ -2282,47 +2282,67 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "tabs": tabs,
                 })
 
-            # Generate ASCII map (using simple ASCII for compatibility)
+            # Generate visual session map with Unicode box drawing
             lines = []
-            lines.append("+" + "=" * 78 + "+")
-            lines.append("|" + "ZELLIJ SESSION MAP".center(78) + "|")
-            lines.append("+" + "=" * 78 + "+")
 
-            for sess in session_maps:
-                marker = " << CURRENT" if sess["current"] else ""
-                agent = " [AGENT]" if sess["name"] == "zellij-agent" else ""
-                lines.append("|" + " " * 78 + "|")
-                lines.append("|  " + f"+-- {sess['name']}{marker}{agent} ".ljust(75, "-") + "+ |")
+            # Header
+            lines.append("╔══════════════════════════════════════════════════════════════╗")
+            lines.append("║  SESSION MAP                                                 ║")
+            lines.append("╠══════════════════════════════════════════════════════════════╣")
+
+            for i, sess in enumerate(session_maps):
+                is_agent = sess["name"] == "zellij-agent"
+                is_current = sess["current"]
+
+                # Session header
+                status = "● ACTIVE" if is_current else "○ idle"
+                badge = " [AGENT]" if is_agent else ""
+                sess_line = f"  {sess['name']}{badge}"
+                lines.append(f"║{sess_line.ljust(48)}{status.rjust(14)} ║")
+
                 if sess["cwd"]:
-                    lines.append("|  |  " + f"cwd: {sess['cwd']}".ljust(72) + "| |")
+                    cwd_short = sess["cwd"][-45:] if len(sess["cwd"]) > 45 else sess["cwd"]
+                    lines.append(f"║  └─ {cwd_short.ljust(57)} ║")
+
+                lines.append("║                                                              ║")
 
                 for tab in sess["tabs"]:
-                    focus = " *" if tab["focused"] else ""
-                    lines.append("|  |" + " " * 73 + "| |")
-                    lines.append("|  |  " + f"[{tab['name']}]{focus}".ljust(72) + "| |")
+                    focus_marker = "►" if tab["focused"] else " "
+                    tab_line = f"  {focus_marker} [{tab['name']}]"
+                    lines.append(f"║{tab_line.ljust(62)} ║")
 
                     if not compact:
-                        # Show panes
+                        # Build pane grid (2 columns)
                         panes = tab["panes"] if tab["panes"] else ["shell"]
-                        for pane in panes[:4]:  # Limit to 4 panes
-                            pane_display = pane[:65] + "..." if len(pane) > 68 else pane
-                            lines.append("|  |    " + f"|-- {pane_display}".ljust(70) + "| |")
+                        floating = tab["floating"]
 
-                        if len(panes) > 4:
-                            lines.append("|  |    " + f"`-- ... and {len(panes) - 4} more".ljust(70) + "| |")
+                        # Show panes in 2-column grid
+                        for j in range(0, len(panes), 2):
+                            p1 = panes[j][:27] if len(panes[j]) > 27 else panes[j]
+                            if j + 1 < len(panes):
+                                p2 = panes[j+1][:27] if len(panes[j+1]) > 27 else panes[j+1]
+                                lines.append(f"║    ┌{'─'*28}┬{'─'*28}┐  ║")
+                                lines.append(f"║    │ {p1.ljust(26)} │ {p2.ljust(26)} │  ║")
+                                lines.append(f"║    └{'─'*28}┴{'─'*28}┘  ║")
+                            else:
+                                lines.append(f"║    ┌{'─'*28}┐                              ║")
+                                lines.append(f"║    │ {p1.ljust(26)} │                              ║")
+                                lines.append(f"║    └{'─'*28}┘                              ║")
 
-                        # Show floating panes
-                        if tab["floating"]:
-                            float_count = len(tab["floating"])
-                            float_info = tab["floating"][0] if float_count == 1 else f"{float_count} floating"
-                            lines.append("|  |    " + f"(~) {float_info}".ljust(70) + "| |")
+                        # Floating panes
+                        if floating:
+                            float_info = f"⬡ {len(floating)} floating: " + ", ".join(f[:15] for f in floating[:2])
+                            if len(float_info) > 55:
+                                float_info = float_info[:52] + "..."
+                            lines.append(f"║    {float_info.ljust(58)} ║")
 
-                lines.append("|  " + "+" + "-" * 75 + "+ |")
+                # Separator between sessions
+                if i < len(session_maps) - 1:
+                    lines.append("╟──────────────────────────────────────────────────────────────╢")
 
-            lines.append("|" + " " * 78 + "|")
-            lines.append("+" + "=" * 78 + "+")
+            lines.append("╚══════════════════════════════════════════════════════════════╝")
             lines.append("")
-            lines.append("Legend: * = focused tab, (~) = floating, [AGENT] = agent session")
+            lines.append("► = focused tab  ● = current session  ⬡ = floating panes")
 
             result = {
                 "success": True,

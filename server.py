@@ -9,6 +9,8 @@ import asyncio
 import time
 import hashlib
 import threading
+import pty
+import signal
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -225,6 +227,342 @@ def plugin_find_pane_id(name: str, session: str = None) -> Optional[int]:
 
 
 # =============================================================================
+# DAEMON COMMUNICATION - Focus-free pane reading via attached daemon
+# =============================================================================
+# The daemon runs INSIDE a Zellij session and can use dump-screen reliably.
+# It listens on a Unix socket for commands from the MCP server.
+
+import socket as socket_module
+
+
+def get_daemon_socket_path(session: str = None) -> str:
+    """Get the daemon socket path for a session."""
+    session_name = session or os.environ.get("ZELLIJ_SESSION_NAME", "default")
+    return f"/tmp/zellij-daemon-{session_name}.sock"
+
+
+def is_daemon_running(session: str = None) -> bool:
+    """Check if the daemon is running for a session."""
+    socket_path = get_daemon_socket_path(session)
+    return os.path.exists(socket_path)
+
+
+def daemon_request(request: dict, session: str = None, timeout: float = 10.0) -> dict:
+    """Send a request to the daemon and return the response."""
+    socket_path = get_daemon_socket_path(session)
+    if not os.path.exists(socket_path):
+        return {"success": False, "error": "Daemon not running"}
+
+    sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        sock.connect(socket_path)
+        sock.send(json.dumps(request).encode('utf-8'))
+        response = sock.recv(65536).decode('utf-8')
+        return json.loads(response)
+    except socket_module.timeout:
+        return {"success": False, "error": "Daemon request timed out"}
+    except ConnectionRefusedError:
+        return {"success": False, "error": "Daemon connection refused"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        sock.close()
+
+
+def daemon_read_pane(pane_id: int, full: bool = False, tail: int = None,
+                     session: str = None) -> dict:
+    """Read pane content via the daemon (focus-free)."""
+    return daemon_request({
+        "cmd": "read",
+        "pane_id": pane_id,
+        "full": full,
+        "tail": tail
+    }, session=session)
+
+
+def daemon_write_pane(pane_id: int, chars: str, session: str = None) -> dict:
+    """Write to a pane via the daemon."""
+    return daemon_request({
+        "cmd": "write",
+        "pane_id": pane_id,
+        "chars": chars
+    }, session=session)
+
+
+def daemon_list_panes(session: str = None) -> dict:
+    """List panes via the daemon."""
+    return daemon_request({"cmd": "list"}, session=session)
+
+
+def daemon_status(session: str = None) -> dict:
+    """Get daemon status."""
+    return daemon_request({"cmd": "status"}, session=session)
+
+
+_daemon_start_attempted: dict[str, bool] = {}  # Track per-session to avoid repeated attempts
+
+
+def start_daemon(session: str = None) -> dict:
+    """Start the daemon in a hidden pane within the session.
+
+    The daemon must run INSIDE the Zellij session for dump-screen to work.
+    """
+    session_name = session or os.environ.get("ZELLIJ_SESSION_NAME")
+    if not session_name:
+        return {"success": False, "error": "No session specified"}
+
+    # Check if already running
+    if is_daemon_running(session):
+        return {"success": True, "message": "Daemon already running"}
+
+    # Find the daemon script
+    daemon_script = os.path.join(os.path.dirname(__file__), "zellij-daemon.py")
+    if not os.path.exists(daemon_script):
+        return {"success": False, "error": f"Daemon script not found: {daemon_script}"}
+
+    socket_path = get_daemon_socket_path(session)
+
+    # Create a hidden pane in the session to run the daemon
+    # Use a floating pane that we immediately minimize
+    args = ["action", "new-pane", "--floating", "--name", "zellij-daemon",
+            "--", "python3", daemon_script, "--socket", socket_path]
+    result = run_zellij(*args, session=session)
+
+    if not result.get("success"):
+        return result
+
+    # Wait for daemon to start
+    for _ in range(10):
+        time.sleep(0.3)
+        if is_daemon_running(session):
+            # Hide the daemon pane by toggling floating
+            zellij_action("toggle-floating-panes", session=session)
+            return {"success": True, "message": "Daemon started", "socket": socket_path}
+
+    return {"success": False, "error": "Daemon failed to start within timeout"}
+
+
+def ensure_daemon(session: str = None) -> bool:
+    """Ensure daemon is running, auto-start if needed. Returns True if available."""
+    session_key = _resolve_session_key(session)
+
+    # Already running?
+    if is_daemon_running(session):
+        return True
+
+    # Already tried and failed this session? Don't spam retries
+    if _daemon_start_attempted.get(session_key):
+        return False
+
+    # Try to start
+    _daemon_start_attempted[session_key] = True
+    result = start_daemon(session)
+    return result.get("success", False)
+
+
+# =============================================================================
+# SESSION MANAGER - Native cross-session control via pty attachments
+# =============================================================================
+
+@dataclass
+class SessionAttachment:
+    """Tracks a headless pty attachment to a Zellij session."""
+    session: str
+    pid: int
+    master_fd: int
+    created_at: float = field(default_factory=time.time)
+
+
+class SessionManager:
+    """Manages headless attachments and daemons across Zellij sessions.
+
+    For cross-session control, we need:
+    1. A pty-based "headless client" attached to the target session
+    2. A daemon running inside that session for focus-free operations
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._attachments: dict[str, SessionAttachment] = {}
+
+    def _is_current_session(self, session: str) -> bool:
+        """Check if session is the current attached session."""
+        current = os.environ.get("ZELLIJ_SESSION_NAME")
+        return session == current or (not session and current)
+
+    def _is_attachment_alive(self, attachment: SessionAttachment) -> bool:
+        """Check if the headless attachment process is still running."""
+        try:
+            os.kill(attachment.pid, 0)  # Signal 0 = check if process exists
+            return True
+        except OSError:
+            return False
+
+    def headless_attach(self, session: str) -> dict:
+        """Create a headless pty attachment to a Zellij session.
+
+        This creates a pseudo-terminal and forks a process that runs
+        'zellij attach <session>', making Zellij think a client is connected.
+        """
+        with self._lock:
+            # Already attached?
+            if session in self._attachments:
+                att = self._attachments[session]
+                if self._is_attachment_alive(att):
+                    return {"success": True, "message": "Already attached", "pid": att.pid}
+                else:
+                    # Clean up dead attachment
+                    self._cleanup_attachment(att)
+                    del self._attachments[session]
+
+            # Check if session exists
+            active = get_active_sessions()
+            if session not in active:
+                return {"success": False, "error": f"Session '{session}' not found"}
+
+            try:
+                # Create pseudo-terminal
+                master_fd, slave_fd = pty.openpty()
+
+                pid = os.fork()
+                if pid == 0:
+                    # Child process - becomes the headless Zellij client
+                    try:
+                        os.setsid()  # New session, detach from parent
+                        os.dup2(slave_fd, 0)  # stdin
+                        os.dup2(slave_fd, 1)  # stdout
+                        os.dup2(slave_fd, 2)  # stderr
+                        os.close(master_fd)
+                        os.close(slave_fd)
+                        os.execvp("zellij", ["zellij", "attach", session])
+                    except Exception:
+                        os._exit(1)
+                else:
+                    # Parent process
+                    os.close(slave_fd)
+
+                    # Wait briefly for attachment to establish
+                    time.sleep(0.5)
+
+                    # Verify it's still running
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        os.close(master_fd)
+                        return {"success": False, "error": "Attachment process died immediately"}
+
+                    attachment = SessionAttachment(
+                        session=session,
+                        pid=pid,
+                        master_fd=master_fd
+                    )
+                    self._attachments[session] = attachment
+
+                    return {"success": True, "pid": pid, "session": session}
+
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    def detach(self, session: str) -> dict:
+        """Detach from a session, cleaning up the headless attachment."""
+        with self._lock:
+            if session not in self._attachments:
+                return {"success": True, "message": "Not attached"}
+
+            att = self._attachments[session]
+            self._cleanup_attachment(att)
+            del self._attachments[session]
+
+            return {"success": True, "message": f"Detached from {session}"}
+
+    def _cleanup_attachment(self, attachment: SessionAttachment):
+        """Clean up a headless attachment."""
+        try:
+            os.close(attachment.master_fd)
+        except OSError:
+            pass
+        try:
+            os.kill(attachment.pid, signal.SIGTERM)
+            # Give it a moment to exit gracefully
+            time.sleep(0.1)
+            try:
+                os.kill(attachment.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        except OSError:
+            pass
+
+    def ensure_session_ready(self, session: str) -> bool:
+        """Ensure a session is ready for daemon operations.
+
+        For current session: just return True (already have client).
+        For other sessions: create headless attachment if needed.
+        """
+        if self._is_current_session(session):
+            return True
+
+        if not session:
+            return True  # Will use current session
+
+        # Check if already attached
+        with self._lock:
+            if session in self._attachments:
+                if self._is_attachment_alive(self._attachments[session]):
+                    return True
+
+        # Need to attach
+        result = self.headless_attach(session)
+        return result.get("success", False)
+
+    def list_attachments(self) -> list[dict]:
+        """List all active headless attachments."""
+        with self._lock:
+            result = []
+            dead = []
+            for session, att in self._attachments.items():
+                if self._is_attachment_alive(att):
+                    result.append({
+                        "session": session,
+                        "pid": att.pid,
+                        "age_seconds": time.time() - att.created_at
+                    })
+                else:
+                    dead.append(session)
+
+            # Clean up dead attachments
+            for session in dead:
+                self._cleanup_attachment(self._attachments[session])
+                del self._attachments[session]
+
+            return result
+
+    def cleanup_all(self):
+        """Clean up all attachments (call on shutdown)."""
+        with self._lock:
+            for att in self._attachments.values():
+                self._cleanup_attachment(att)
+            self._attachments.clear()
+
+
+# Global session manager
+session_manager = SessionManager()
+
+
+def ensure_session_daemon(session: str = None) -> bool:
+    """Ensure both session attachment and daemon are ready.
+
+    This is the main entry point for cross-session operations.
+    """
+    # First ensure we can talk to the session (pty attachment for remote sessions)
+    if not session_manager.ensure_session_ready(session):
+        return False
+
+    # Then ensure daemon is running in that session
+    return ensure_daemon(session)
+
+
+# =============================================================================
 # UTILITIES
 # =============================================================================
 
@@ -374,7 +712,7 @@ class PaneInfo:
     repl_type: Optional[str] = None
     pane_index: Optional[int] = None  # Index within tab at creation time
     floating: bool = False  # Whether pane is floating
-    log_path: Optional[str] = None  # Path to script log file for reading output
+    pane_id: Optional[int] = None  # Zellij pane ID for daemon communication
 
 
 @dataclass
@@ -425,11 +763,11 @@ class SessionState:
     def register_pane(self, name: str, tab: str, command: str = None,
                       cwd: str = None, repl_type: str = None,
                       pane_index: int = None, floating: bool = False,
-                      log_path: str = None) -> PaneInfo:
+                      pane_id: int = None) -> PaneInfo:
         """Register a named pane. Thread-safe."""
         pane = PaneInfo(name=name, tab=tab, command=command, cwd=cwd,
                         repl_type=repl_type, pane_index=pane_index, floating=floating,
-                        log_path=log_path)
+                        pane_id=pane_id)
         with self._lock:
             self.panes[name] = pane
         return pane
@@ -1444,6 +1782,25 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="session_attach",
+            description="Manage cross-session control. Creates headless pty attachments to other sessions for daemon-based operations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "attach", "detach", "detach_all"],
+                        "description": "Action: list attachments, attach to session, detach from session, or detach all",
+                        "default": "list",
+                    },
+                    "session": {
+                        "type": "string",
+                        "description": "Target session name (required for attach/detach)",
+                    },
+                },
+            },
+        ),
         # === LAYOUT ===
         Tool(
             name="dump_layout",
@@ -1688,24 +2045,37 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         do_strip = arguments.get("strip_ansi", True)
         tail_lines = arguments.get("tail")
 
-        # Check if pane has a log file (script-based logging)
-        registered_pane = state.get_pane(pane_name) if pane_name else None
-        if registered_pane and registered_pane.log_path and os.path.exists(registered_pane.log_path):
-            # Read from log file - no focus needed!
-            try:
-                with open(registered_pane.log_path, 'r', errors='replace') as f:
-                    content = f.read()
-                if do_strip:
-                    content = strip_ansi(content)
-                if tail_lines:
-                    lines = content.split('\n')
-                    content = '\n'.join(lines[-tail_lines:])
-                result = {"success": True, "content": content, "method": "log_file",
-                          "log_path": registered_pane.log_path}
-            except Exception as e:
-                result = {"success": False, "error": f"Failed to read log: {e}"}
+        # Try to get pane_id for daemon communication
+        pane_id = None
+        if pane_name:
+            registered_pane = state.get_pane(pane_name)
+            if registered_pane and registered_pane.pane_id:
+                pane_id = registered_pane.pane_id
+            elif is_plugin_available():
+                # Try to find pane_id via plugin
+                pane_id = plugin_find_pane_id(pane_name, session=session)
+                # Update registered pane with discovered pane_id
+                if pane_id and registered_pane:
+                    registered_pane.pane_id = pane_id
+
+        # Try daemon first for focus-free reads (auto-start if needed, cross-session support)
+        daemon_result = None
+        if pane_id and ensure_session_daemon(session):
+            daemon_result = daemon_read_pane(
+                pane_id,
+                full=arguments.get("full", False),
+                tail=tail_lines,
+                session=session
+            )
+
+        if daemon_result and daemon_result.get("success"):
+            content = daemon_result.get("content", "")
+            if do_strip:
+                content = strip_ansi(content)
+            result = {"success": True, "content": content, "method": "daemon",
+                      "pane_id": pane_id}
         else:
-            # Fall back to dump-screen method
+            # Fall back to dump-screen method (requires focus)
             async def do_read():
                 args = ["dump-screen", "/dev/stdout"]
                 if arguments.get("full"):
@@ -1713,25 +2083,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return zellij_action(*args, capture=True, session=session)
 
             if pane_name:
-                # Try plugin-based focus first (more reliable pane lookup by title)
-                if is_plugin_available():
-                    pane_id = plugin_find_pane_id(pane_name, session=session)
-                    if pane_id is not None:
-                        # Focus via plugin, then read
-                        focus_result = plugin_command("focus", {"pane_id": pane_id}, session=session)
-                        if focus_result.get("success"):
-                            result = await do_read()
-                            result["method"] = "plugin"
-                        else:
-                            # Plugin focus failed, fall back to with_pane_focus
-                            result = await with_pane_focus(pane_name, do_read, session=session)
-                            result["method"] = "focus_fallback"
+                if pane_id is not None:
+                    # Focus via plugin, then read
+                    focus_result = plugin_command("focus", {"pane_id": pane_id}, session=session)
+                    if focus_result.get("success"):
+                        result = await do_read()
+                        result["method"] = "plugin_focus"
                     else:
-                        # Pane not found via plugin, try focus method
                         result = await with_pane_focus(pane_name, do_read, session=session)
-                        result["method"] = "focus"
+                        result["method"] = "focus_fallback"
                 else:
-                    # Plugin not available
+                    # Pane not found via plugin, try focus method
                     result = await with_pane_focus(pane_name, do_read, session=session)
                     result["method"] = "focus"
             else:
@@ -1994,35 +2356,45 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         pane_name = arguments.get("pane_name")
         reset = arguments.get("reset", False)
 
-        # Check if pane has a log file (script-based logging)
+        # Try to get pane_id for daemon communication
+        pane_id = None
         registered_pane = state.get_pane(pane_name) if pane_name else None
-        if registered_pane and registered_pane.log_path and os.path.exists(registered_pane.log_path):
-            # Read from log file - no focus needed!
-            try:
-                with open(registered_pane.log_path, 'r', errors='replace') as f:
-                    content = f.read()
-                content = strip_ansi(content)
-                lines = content.split('\n')
-                current_count = len(lines)
+        if registered_pane and registered_pane.pane_id:
+            pane_id = registered_pane.pane_id
+        elif pane_name and is_plugin_available():
+            pane_id = plugin_find_pane_id(pane_name, session=session)
+            if pane_id and registered_pane:
+                registered_pane.pane_id = pane_id
 
-                cursor_key = f"{_resolve_session_key(session)}:{pane_name}"
+        # Try daemon first for focus-free reads (auto-start if needed, cross-session support)
+        daemon_content = None
+        method = "dump-screen"
+        if pane_id and ensure_session_daemon(session):
+            daemon_result = daemon_read_pane(pane_id, full=True, session=session)
+            if daemon_result.get("success"):
+                daemon_content = strip_ansi(daemon_result.get("content", ""))
+                method = "daemon"
 
-                if reset:
-                    state.pane_cursors[cursor_key] = current_count
-                    result = {"success": True, "reset": True, "line_count": current_count,
-                              "method": "log_file"}
-                else:
-                    cursor = state.pane_cursors.get(cursor_key, 0)
-                    new_lines = lines[cursor:] if cursor < current_count else []
-                    state.pane_cursors[cursor_key] = current_count
-                    result = {
-                        "success": True,
-                        "new_output": '\n'.join(new_lines),
-                        "lines_read": len(new_lines),
-                        "method": "log_file",
-                    }
-            except Exception as e:
-                result = {"success": False, "error": f"Failed to read log: {e}"}
+        if daemon_content is not None:
+            # Use daemon content
+            lines = daemon_content.split('\n')
+            current_count = len(lines)
+            cursor_key = f"{_resolve_session_key(session)}:{pane_name}"
+
+            if reset:
+                state.pane_cursors[cursor_key] = current_count
+                result = {"success": True, "reset": True, "line_count": current_count,
+                          "method": method}
+            else:
+                cursor = state.pane_cursors.get(cursor_key, 0)
+                new_lines = lines[cursor:] if cursor < current_count else []
+                state.pane_cursors[cursor_key] = current_count
+                result = {
+                    "success": True,
+                    "new_output": '\n'.join(new_lines),
+                    "lines_read": len(new_lines),
+                    "method": method,
+                }
         else:
             # Fall back to dump-screen method
             async def do_read():
@@ -2167,22 +2539,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                              and not (p.get("command") and "plugin" in str(p.get("command", "")))]
                 pre_pane_count = len(tab_panes)
 
-            # Create log file path for output capture
-            log_dir = os.path.expanduser("~/.local/share/zellij-mcp/logs")
-            os.makedirs(log_dir, exist_ok=True)
-            log_path = os.path.join(log_dir, f"{pane_name}.log")
-
-            # Remove old log file if exists
-            try:
-                os.unlink(log_path)
-            except FileNotFoundError:
-                pass
-
-            # Wrap command in script for output logging
-            # This enables reading pane output without focus
-            shell_cmd = command or "bash"
-            script_cmd = f"script -q -f {log_path} -c '{shell_cmd}'"
-
             # Create the pane using 'action new-pane' (works in detached sessions)
             args = ["action", "new-pane", "--name", pane_name]
             if floating:
@@ -2191,7 +2547,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 args.extend(["--direction", direction])
             if cwd:
                 args.extend(["--cwd", cwd])
-            args.extend(["--", script_cmd])
+            if command:
+                args.extend(["--", command])
             create_result = run_zellij(*args, session=session)
 
             if create_result.get("success"):
@@ -2205,13 +2562,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     zellij_action("write", "13", session=session)  # 13 = Enter key
                     time.sleep(0.5)  # Wait for command to start
 
-                # Write a unique marker to the pane content for identification
-                # The new pane should be focused after creation
-                marker = f"# ZELLIJ_PANE_ID={pane_name}"
-                zellij_action("write-chars", f"echo '{marker}'", session=session)
-                time.sleep(0.1)
-                zellij_action("write-chars", "\n", session=session)
-                time.sleep(0.2)
+                # Rename the pane to match the requested name (enables plugin lookup by title)
+                zellij_action("rename-pane", pane_name, session=session)
+
+                # Try to get the pane ID for daemon communication
+                pane_id = None
+                if is_plugin_available():
+                    pane_id = plugin_find_pane_id(pane_name, session=session)
 
                 # New pane index = pre_pane_count (0-indexed)
                 new_pane_index = pre_pane_count
@@ -2224,7 +2581,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     cwd=cwd,
                     pane_index=new_pane_index,
                     floating=floating or False,
-                    log_path=log_path,
+                    pane_id=pane_id,
                 )
                 result = {"success": True, "created": True, "pane": pane_info.__dict__,
                           "direction": direction}
@@ -2993,6 +3350,37 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 "map": "\n".join(lines),
                 "sessions": session_maps,
             }
+
+    elif name == "session_attach":
+        action = arguments.get("action", "list")
+        target_session = arguments.get("session")
+
+        if action == "list":
+            attachments = session_manager.list_attachments()
+            result = {
+                "success": True,
+                "attachments": attachments,
+                "count": len(attachments),
+            }
+        elif action == "attach":
+            if not target_session:
+                result = {"success": False, "error": "Session name required for attach"}
+            else:
+                result = session_manager.headless_attach(target_session)
+                if result.get("success"):
+                    # Also start daemon in the newly attached session
+                    daemon_result = start_daemon(target_session)
+                    result["daemon"] = daemon_result
+        elif action == "detach":
+            if not target_session:
+                result = {"success": False, "error": "Session name required for detach"}
+            else:
+                result = session_manager.detach(target_session)
+        elif action == "detach_all":
+            session_manager.cleanup_all()
+            result = {"success": True, "message": "All attachments cleaned up"}
+        else:
+            result = {"success": False, "error": f"Unknown action: {action}"}
 
     # === LAYOUT ===
     elif name == "dump_layout":

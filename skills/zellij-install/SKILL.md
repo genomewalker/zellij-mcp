@@ -51,20 +51,16 @@ Questions:
 
 ### Step 3: Execute Installation
 
-**Fresh Install:**
+**Fresh Install (one-liner):**
 ```bash
-# Clone to user's preferred location (suggest ~/.local/share)
-cd ~/.local/share
-git clone https://github.com/genomewalker/zellij-mcp
-cd zellij-mcp
-./scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/genomewalker/zellij-mcp/main/scripts/install.sh | bash
 ```
+
+This clones the repo to `~/.local/share/zellij-mcp` and sets up everything.
 
 **Update Existing:**
 ```bash
-cd ~/.local/share/zellij-mcp  # or wherever installed
-git pull
-./scripts/install.sh
+cd ~/.local/share/zellij-mcp && git pull && ./scripts/install.sh
 ```
 
 **Development Mode:**
@@ -73,6 +69,8 @@ Ask where the repo is located, then:
 cd /path/to/zellij-mcp
 ./scripts/install.sh
 ```
+
+This syncs to the install directory while preserving your dev repo.
 
 ### Step 4: Verify Installation
 

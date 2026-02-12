@@ -2293,10 +2293,33 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 """Parse layout string into a tree structure for a tab."""
                 lines_iter = iter(layout_str.split('\n'))
 
-                def parse_pane(depth=0):
+                def extract_attrs(line: str) -> dict:
+                    """Extract attributes from a pane line."""
+                    attrs = {"command": None, "name": None, "size": None, "focused": False,
+                             "split": "horizontal"}
+                    if 'split_direction="vertical"' in line:
+                        attrs["split"] = "vertical"
+                    if 'focus=true' in line and 'hide_floating' not in line:
+                        attrs["focused"] = True
+                    cmd = re.search(r'command="([^"]+)"', line)
+                    if cmd:
+                        attrs["command"] = cmd.group(1)
+                    name = re.search(r'name="([^"]+)"', line)
+                    if name and 'tab ' not in line:
+                        attrs["name"] = name.group(1)
+                    size = re.search(r'size="?(\d+%?)"?', line)
+                    if size:
+                        attrs["size"] = size.group(1)
+                    return attrs
+
+                def parse_pane(initial_attrs=None):
                     """Recursively parse pane structure."""
-                    pane = {"type": "pane", "children": [], "name": None, "command": None,
-                            "split": "horizontal", "size": None, "focused": False}
+                    pane = {"type": "pane", "children": []}
+                    if initial_attrs:
+                        pane.update(initial_attrs)
+                    else:
+                        pane.update({"name": None, "command": None, "split": "horizontal",
+                                     "size": None, "focused": False})
 
                     for line in lines_iter:
                         stripped = line.strip()
@@ -2307,106 +2330,147 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                         if stripped == '}':
                             return pane
 
-                        # Check for pane properties
-                        if 'split_direction="vertical"' in stripped:
-                            pane["split"] = "vertical"
-                        if 'focus=true' in stripped and 'hide_floating' not in stripped:
-                            pane["focused"] = True
-
-                        # Extract command
-                        cmd_match = re.search(r'command="([^"]+)"', stripped)
-                        if cmd_match:
-                            pane["command"] = cmd_match.group(1)
-
-                        # Extract name
-                        name_match = re.search(r'name="([^"]+)"', stripped)
-                        if name_match and 'tab ' not in stripped:
-                            pane["name"] = name_match.group(1)
-
-                        # Extract size
-                        size_match = re.search(r'size="?(\d+%?)"?', stripped)
-                        if size_match:
-                            pane["size"] = size_match.group(1)
-
-                        # Skip plugins
+                        # Skip plugins and their content
                         if 'plugin' in stripped:
-                            # Skip until closing brace
                             brace_count = stripped.count('{') - stripped.count('}')
                             while brace_count > 0:
                                 next_line = next(lines_iter, '')
                                 brace_count += next_line.count('{') - next_line.count('}')
                             continue
 
-                        # Nested pane
-                        if stripped.startswith('pane') and '{' in stripped:
-                            child = parse_pane(depth + 1)
-                            if child and (child["children"] or child["command"] or child["name"]):
+                        # Skip non-pane lines (args, start_suspended, etc.)
+                        if not stripped.startswith('pane'):
+                            continue
+
+                        # Skip borderless panes (plugin containers like tab-bar, status-bar)
+                        if 'borderless=true' in stripped:
+                            if '{' in stripped:
+                                brace_count = 1
+                                while brace_count > 0:
+                                    next_line = next(lines_iter, '')
+                                    brace_count += next_line.count('{') - next_line.count('}')
+                            continue
+
+                        # Skip floating_panes section
+                        if 'floating_panes' in stripped:
+                            if '{' in stripped:
+                                brace_count = 1
+                                while brace_count > 0:
+                                    next_line = next(lines_iter, '')
+                                    brace_count += next_line.count('{') - next_line.count('}')
+                            continue
+
+                        # Pane with braces - recursive parse
+                        if '{' in stripped:
+                            attrs = extract_attrs(stripped)
+                            child = parse_pane(attrs)
+                            # Keep panes with children, commands, names, or percentage sizes
+                            if child.get("children") or child.get("command") or child.get("name"):
                                 pane["children"].append(child)
-                        elif stripped == 'pane':
-                            # Simple pane without children
-                            pane["children"].append({"type": "pane", "children": [],
-                                                     "name": None, "command": None, "split": "horizontal"})
+                            elif child.get("size") and '%' in str(child.get("size", "")):
+                                # Percentage-sized pane without command = shell
+                                pane["children"].append(child)
+                        else:
+                            # Leaf pane without braces (e.g., "pane size="50%"")
+                            attrs = extract_attrs(stripped)
+                            leaf = {"type": "pane", "children": [], **attrs}
+                            pane["children"].append(leaf)
 
                     return pane
 
                 return parse_pane()
 
             def render_layout(pane: dict, width: int, height: int, x: int = 0, y: int = 0) -> list:
-                """Render pane tree into a 2D grid. Returns list of (x, y, w, h, label)."""
+                """Render pane tree into a 2D grid. Returns list of (x, y, w, h, label, focused)."""
                 cells = []
-
-                children = [c for c in pane.get("children", []) if c.get("children") or c.get("command") or not c.get("name")]
+                children = pane.get("children", [])
 
                 if not children:
-                    # Leaf pane
+                    # Leaf pane - show it
                     label = pane.get("command") or pane.get("name") or "shell"
-                    label = label.split('/')[-1][:12]  # Shorten
+                    label = label.split('/')[-1][:12]
                     cells.append((x, y, width, height, label, pane.get("focused", False)))
                 else:
-                    # Container - split children
-                    is_vertical = pane.get("split") == "vertical"
+                    # Container - split children based on direction
+                    is_vertical = pane.get("split") == "vertical"  # vertical = side by side
                     n = len(children)
 
+                    # Calculate sizes from percentages or divide equally
+                    sizes = []
+                    for c in children:
+                        sz = c.get("size")
+                        if sz and sz.endswith('%'):
+                            sizes.append(int(sz[:-1]))
+                        elif sz and sz.isdigit():
+                            sizes.append(int(sz))
+                        else:
+                            sizes.append(0)
+
+                    # Normalize sizes - distribute remaining to unspecified
+                    total = sum(sizes)
+                    unspec = sizes.count(0)
+                    if total < 100 and unspec > 0:
+                        remaining = 100 - total
+                        for i in range(len(sizes)):
+                            if sizes[i] == 0:
+                                sizes[i] = remaining // unspec
+
+                    # Render children
                     if is_vertical:
                         # Horizontal arrangement (side by side)
-                        cw = width // n
+                        cx = x
                         for i, child in enumerate(children):
-                            cx = x + i * cw
-                            actual_w = cw if i < n - 1 else (width - i * cw)
-                            cells.extend(render_layout(child, actual_w, height, cx, y))
+                            cw = max(1, (width * sizes[i]) // 100) if sum(sizes) > 0 else width // n
+                            if i == n - 1:  # Last child takes remaining space
+                                cw = width - (cx - x)
+                            cells.extend(render_layout(child, cw, height, cx, y))
+                            cx += cw
                     else:
                         # Vertical arrangement (stacked)
-                        ch = height // n
+                        cy = y
                         for i, child in enumerate(children):
-                            cy = y + i * ch
-                            actual_h = ch if i < n - 1 else (height - i * ch)
-                            cells.extend(render_layout(child, width, actual_h, x, cy))
+                            ch = max(1, (height * sizes[i]) // 100) if sum(sizes) > 0 else height // n
+                            if i == n - 1:
+                                ch = height - (cy - y)
+                            cells.extend(render_layout(child, width, ch, x, cy))
+                            cy += ch
 
                 return cells
 
             def draw_grid(cells: list, width: int, height: int) -> list:
-                """Draw cells as ASCII grid."""
-                # Initialize grid
+                """Draw cells as ASCII grid with proper box characters."""
+                # Initialize grid and metadata
                 grid = [[' ' for _ in range(width)] for _ in range(height)]
+                colors = [[None for _ in range(width)] for _ in range(height)]
+
+                # Sort cells by area (draw smaller on top)
+                cells = sorted(cells, key=lambda c: c[2] * c[3], reverse=True)
 
                 for cx, cy, cw, ch, label, focused in cells:
-                    if cw < 3 or ch < 2:
+                    if cw < 3 or ch < 1:
                         continue
 
-                    # Draw box
-                    for i in range(cx, cx + cw):
-                        if i < width:
-                            if cy < height:
-                                grid[cy][i] = '─'
-                            if cy + ch - 1 < height:
-                                grid[cy + ch - 1][i] = '─'
+                    # Draw horizontal borders
+                    for i in range(cx, min(cx + cw, width)):
+                        if cy < height:
+                            grid[cy][i] = '─'
+                            if focused:
+                                colors[cy][i] = O
+                        if cy + ch - 1 < height and ch > 1:
+                            grid[cy + ch - 1][i] = '─'
+                            if focused:
+                                colors[cy + ch - 1][i] = O
 
-                    for j in range(cy, cy + ch):
-                        if j < height:
-                            if cx < width:
-                                grid[j][cx] = '│'
-                            if cx + cw - 1 < width:
-                                grid[j][cx + cw - 1] = '│'
+                    # Draw vertical borders
+                    for j in range(cy, min(cy + ch, height)):
+                        if cx < width:
+                            grid[j][cx] = '│'
+                            if focused:
+                                colors[j][cx] = O
+                        if cx + cw - 1 < width:
+                            grid[j][cx + cw - 1] = '│'
+                            if focused:
+                                colors[j][cx + cw - 1] = O
 
                     # Corners
                     if cy < height and cx < width:
@@ -2419,14 +2483,51 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                         grid[cy + ch - 1][cx + cw - 1] = '┘'
 
                     # Label (centered)
-                    label_y = cy + ch // 2
-                    label_x = cx + (cw - len(label)) // 2
-                    if label_y < height:
-                        for k, char in enumerate(label[:cw-2]):
-                            if label_x + k < width and label_x + k > cx:
+                    label_y = cy + max(1, ch // 2) if ch > 1 else cy
+                    max_label_len = cw - 2
+                    if max_label_len > 0:
+                        disp_label = label[:max_label_len]
+                        label_x = cx + 1 + (max_label_len - len(disp_label)) // 2
+                        for k, char in enumerate(disp_label):
+                            if label_x + k < width:
                                 grid[label_y][label_x + k] = char
+                                if focused:
+                                    colors[label_y][label_x + k] = O
 
-                return [''.join(row) for row in grid]
+                # Fix overlapping corners
+                for y in range(height):
+                    for x in range(width):
+                        c = grid[y][x]
+                        # Check neighbors for T-junctions
+                        has_up = y > 0 and grid[y-1][x] in '│┌┐├┤┬┴┼'
+                        has_down = y < height-1 and grid[y+1][x] in '│└┘├┤┬┴┼'
+                        has_left = x > 0 and grid[y][x-1] in '─┌└├┬┴┼'
+                        has_right = x < width-1 and grid[y][x+1] in '─┐┘┤┬┴┼'
+
+                        if c in '┌┐└┘─│':
+                            if has_up and has_down and has_left and has_right:
+                                grid[y][x] = '┼'
+                            elif has_up and has_down and has_right:
+                                grid[y][x] = '├'
+                            elif has_up and has_down and has_left:
+                                grid[y][x] = '┤'
+                            elif has_left and has_right and has_down:
+                                grid[y][x] = '┬'
+                            elif has_left and has_right and has_up:
+                                grid[y][x] = '┴'
+
+                # Build output with colors
+                lines = []
+                for y in range(height):
+                    line = ""
+                    for x in range(width):
+                        if colors[y][x]:
+                            line += colors[y][x] + grid[y][x] + R
+                        else:
+                            line += grid[y][x]
+                    lines.append(line)
+
+                return lines
 
             lines = []
 

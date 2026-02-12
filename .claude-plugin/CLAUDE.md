@@ -214,3 +214,61 @@ All tools accept `session` parameter to target other Zellij sessions:
 list_sessions()
 read_pane(session="other-session", pane_name="worker")
 ```
+
+## Important Usage Notes
+
+### Pane Name Resolution
+
+Panes are found by matching against `name` or `command` in the layout:
+- `read_pane(pane_name="ipython")` matches a pane named "ipython" OR running the "ipython" command
+- Use `list_panes()` to see available panes with their names and commands
+- Pane names are case-insensitive partial matches
+
+### SSH Session Lifecycle
+
+**Always connect before running commands:**
+```python
+# CORRECT: Connect first, then run
+ssh_connect(name="hpc", host="user@cluster")
+ssh_run(name="hpc", command="ls")
+
+# WRONG: Will fail - session doesn't exist
+ssh_run(name="hpc", command="ls")  # Error: SSH session 'hpc' not found
+```
+
+### Error Handling
+
+All tools return `{"success": true/false, ...}`. Check the response:
+- `success: false` with `error` message means the operation failed
+- `destroy_named_pane` returns error if pane not found (not silent success)
+- `wait_for_output` returns `matched: false` on timeout (not failure)
+
+### Pane Targeting by Command
+
+When a pane has no explicit name, target it by command:
+```python
+# If layout shows: pane command="ipython3"
+read_pane(pane_name="ipython3")  # Works - matches command
+```
+
+### Checking Pane State
+
+Before operating on panes, verify they exist:
+```python
+# List all panes to see what's available
+list_panes()  # Shows names, commands, focus state
+
+# For agent session panes specifically
+list_named_panes()  # Shows registered panes and if they're still alive
+```
+
+### Job Tracking
+
+Jobs are tracked in-memory. For untracked jobs, provide `ssh_name`:
+```python
+# Tracked job (from job_submit)
+job_status(job_id="12345")
+
+# Untracked job - must provide ssh_name
+job_status(job_id="12345", ssh_name="hpc")
+```

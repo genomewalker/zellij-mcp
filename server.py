@@ -1310,7 +1310,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = zellij_action(*args, session=session)
 
     elif name == "close_pane":
-        result = zellij_action("close-pane", session=session)
+        # PROTECTION: Check if focused pane is Claude before closing
+        layout_result = zellij_action("dump-layout", capture=True, session=session)
+        if layout_result.get("success"):
+            panes = parse_layout_panes(layout_result.get("stdout", ""))
+            focused = next((p for p in panes if p.get("focused")), None)
+            if focused and "claude" in (focused.get("name", "") + focused.get("command", "")).lower():
+                result = {"success": False, "error": "Cannot close Claude pane - this would terminate the session"}
+            else:
+                result = zellij_action("close-pane", session=session)
+        else:
+            result = zellij_action("close-pane", session=session)
 
     elif name == "focus_pane":
         result = zellij_action("move-focus", arguments["direction"], session=session)
@@ -1826,8 +1836,37 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     args.extend(["--cwd", cwd])
                 create_result = run_zellij(*args, session=session)
             if create_result.get("success"):
+                # BUG FIX: In detached sessions, new pane may not be focused
+                # Wait briefly for pane creation to complete, then rename
+                time.sleep(0.3)
+
                 # Rename pane to ensure name persists in layout
-                zellij_action("rename-pane", pane_name, session=session)
+                # The new pane SHOULD be focused after creation, but verify
+                rename_result = zellij_action("rename-pane", pane_name, session=session)
+
+                # Verify rename worked by checking layout
+                time.sleep(0.2)
+                verify_layout = zellij_action("dump-layout", capture=True, session=session)
+                if verify_layout.get("success"):
+                    if f'name="{pane_name}"' not in verify_layout.get("stdout", ""):
+                        # Rename didn't work - try focusing newest pane and retry
+                        # Get all panes, find one without custom name that matches our criteria
+                        panes = parse_layout_panes(verify_layout.get("stdout", ""))
+                        # The newest pane is typically last in layout or has our command
+                        for p in reversed(panes):
+                            p_cmd = p.get("command", "")
+                            p_name = p.get("name", "")
+                            # Match by command or find unnamed shell
+                            if (command and command.split()[0] in p_cmd) or \
+                               (not command and p_name in ("", "shell", "Unnamed")):
+                                # Found likely target - navigate to its tab
+                                if p.get("tab") and not p.get("tab_focused"):
+                                    zellij_action("go-to-tab-name", p["tab"], session=session)
+                                    time.sleep(0.1)
+                                # Retry rename
+                                zellij_action("rename-pane", pane_name, session=session)
+                                break
+
                 # Register in state
                 pane_info = state.register_pane(
                     name=pane_name,
@@ -1854,18 +1893,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         pane_name = arguments["name"]
 
-        async def do_close():
-            return zellij_action("close-pane", session=session)
-
-        close_result = await with_pane_focus(pane_name, do_close, session=session)
-
-        # Check if close actually succeeded - unregister only on success
-        if not close_result.get("success"):
-            result = close_result
+        # PROTECTION: Never close the Claude pane
+        if "claude" in pane_name.lower():
+            result = {"success": False, "error": "Cannot close Claude pane - this would terminate the session"}
         else:
-            state.unregister_pane(pane_name)
-            result = {"success": True, "closed": pane_name}
-            layout_cache.invalidate(session)
+            async def do_close():
+                return zellij_action("close-pane", session=session)
+
+            close_result = await with_pane_focus(pane_name, do_close, session=session)
+
+            # Check if close actually succeeded - unregister only on success
+            if not close_result.get("success"):
+                result = close_result
+            else:
+                state.unregister_pane(pane_name)
+                result = {"success": True, "closed": pane_name}
+                layout_cache.invalidate(session)
 
     elif name == "list_named_panes":
         # Use agent session by default for named pane operations

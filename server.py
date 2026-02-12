@@ -2289,90 +2289,68 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             B = "\033[1m"         # bold
             R = "\033[0m"         # reset
 
-            W = 68  # inner width
-
-            def row(content: str, visible_len: int) -> str:
-                """Build a row with proper padding."""
-                pad = W - visible_len
-                return f"{D}│{R} {content}{' ' * pad} {D}│{R}"
-
-            def sep(char: str = "─", left: str = "├", right: str = "┤") -> str:
-                return f"{D}{left}{char * W}{right}{R}"
-
             lines = []
-            lines.append(f"{D}┌{'─' * W}┐{R}")
-            lines.append(row(f"{O}{B}SESSION MAP{R}", 11))
-            lines.append(sep())
 
             for i, sess in enumerate(session_maps):
                 name = sess["name"]
                 is_agent = name == "zellij-agent"
                 is_current = sess["current"]
 
-                # Build session line: "  name [AGENT]          ● ACTIVE"
-                left = f"  {B}{name}{R}"
-                left_len = 2 + len(name)
+                # Session header box
+                badge = f" {O}[AGENT]{R}" if is_agent else ""
+                badge_len = 8 if is_agent else 0
+                status = f"{G}●{R}" if is_current else f"{D}○{R}"
 
-                if is_agent:
-                    left += f" {O}[AGENT]{R}"
-                    left_len += 8
+                header = f"{status} {B}{name}{R}{badge}"
+                header_len = 2 + len(name) + badge_len
 
-                if is_current:
-                    right = f"{G}● ACTIVE{R}"
-                    right_len = 8
-                else:
-                    right = f"{D}○ idle{R}"
-                    right_len = 6
-
-                mid_pad = W - left_len - right_len
-                lines.append(f"{D}│{R}{left}{' ' * mid_pad}{right}{D}│{R}")
-
-                # CWD
-                if sess["cwd"]:
-                    cwd = sess["cwd"]
-                    max_cwd = W - 8
-                    if len(cwd) > max_cwd:
-                        cwd = "..." + cwd[-(max_cwd - 3):]
-                    cwd_line = f"    {D}└─{R} {cwd}"
-                    lines.append(row(cwd_line, 7 + len(cwd)))
+                lines.append(f"{O}╔{'═' * 62}╗{R}")
+                lines.append(f"{O}║{R} {header}{' ' * (60 - header_len)} {O}║{R}")
+                lines.append(f"{O}╚{'═' * 62}╝{R}")
 
                 # Tabs
                 for tab in sess["tabs"]:
-                    is_focused = tab["focused"]
                     tname = tab["name"]
+                    is_focused = tab["focused"]
 
-                    if is_focused:
-                        tab_line = f"    {O}►{R} [{tname}]"
-                        tab_len = 7 + len(tname)
-                    else:
-                        tab_line = f"      [{tname}]"
-                        tab_len = 8 + len(tname)
-
-                    lines.append(row(tab_line, tab_len))
+                    # Tab header
+                    focus = f"{O}►{R} " if is_focused else "  "
+                    tab_status = f"{G}active{R}" if is_focused else f"{D}idle{R}"
+                    lines.append(f"  {focus}{D}[{R}{tname}{D}]{R} {tab_status}")
 
                     if not compact:
-                        panes = tab["panes"] if tab["panes"] else ["shell"]
-                        for j, pane in enumerate(panes[:5]):
-                            max_pane = W - 14
-                            p = pane[:max_pane] if len(pane) > max_pane else pane
-                            pane_line = f"        {D}├─{R} {p}"
-                            lines.append(row(pane_line, 12 + len(p)))
+                        # Collect all panes (tiled + floating)
+                        all_panes = []
+                        for p in (tab["panes"] if tab["panes"] else ["shell"]):
+                            all_panes.append((p[:20], "run"))
+                        for f in tab["floating"]:
+                            all_panes.append((f[:20], "float"))
 
-                        if len(panes) > 5:
-                            more = f"+{len(panes) - 5} more"
-                            lines.append(row(f"        {D}└─{R} {more}", 12 + len(more)))
+                        # Draw panes in 2-column grid
+                        if all_panes:
+                            # Top border
+                            lines.append(f"  {D}┌{'─' * 28}┬{'─' * 28}┐{R}")
 
-                        if tab["floating"]:
-                            n = len(tab["floating"])
-                            fl_line = f"        {O}~{R} {n} floating"
-                            lines.append(row(fl_line, 12 + len(str(n)) + 9))
+                            for j in range(0, len(all_panes), 2):
+                                p1_name, p1_status = all_panes[j]
+                                p1 = f"{p1_name:<20} {D}{p1_status:>5}{R}"
 
-                if i < len(session_maps) - 1:
-                    lines.append(sep())
+                                if j + 1 < len(all_panes):
+                                    p2_name, p2_status = all_panes[j + 1]
+                                    p2 = f"{p2_name:<20} {D}{p2_status:>5}{R}"
+                                else:
+                                    p2 = " " * 26
+                                    p2_status = ""
 
-            lines.append(f"{D}└{'─' * W}┘{R}")
-            lines.append("")
-            lines.append(f"{O}►{R} focused  {G}●{R} current  {O}~{R} floating")
+                                lines.append(f"  {D}│{R} {p1} {D}│{R} {p2} {D}│{R}")
+
+                            # Bottom border
+                            lines.append(f"  {D}└{'─' * 28}┴{'─' * 28}┘{R}")
+
+                lines.append("")  # Space between sessions
+
+            # Legend
+            lines.append(f"{O}●{R} current  {D}○{R} idle  {O}►{R} focused tab")
 
             result = {
                 "success": True,

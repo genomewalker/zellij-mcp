@@ -268,6 +268,19 @@ class TrackedJob:
     status: str = "PENDING"
 
 
+@dataclass
+class SpawnedAgent:
+    """Tracked spawned agent."""
+    name: str
+    pane_name: str
+    task: str
+    prompt: str
+    model: str = "claude-sonnet-4-22k-0514"
+    status: str = "running"  # running, completed, failed
+    spawned_at: float = field(default_factory=time.time)
+    tab: str = "agents"
+
+
 class SessionState:
     """Server-side state that persists across tool calls within a session. Thread-safe."""
 
@@ -278,6 +291,7 @@ class SessionState:
         self.tracked_jobs: dict[str, TrackedJob] = {}
         self.pane_groups: dict[str, list[str]] = {}
         self.pane_cursors: dict[str, int] = {}  # For tail_pane incremental reads
+        self.spawned_agents: dict[str, SpawnedAgent] = {}  # For task-based agent tracking
 
     def register_pane(self, name: str, tab: str, command: str = None,
                       cwd: str = None, repl_type: str = None) -> PaneInfo:
@@ -937,6 +951,60 @@ async def list_tools() -> list[Tool]:
                     "action": {"type": "string", "enum": ["status", "create", "destroy"],
                                "description": "Action: status (default), create, or destroy", "default": "status"},
                 },
+            },
+        ),
+        Tool(
+            name="spawn_agents",
+            description="Spawn multiple Claude agents in parallel, each working on a task. Creates panes in agent session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "List of tasks for agents",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Task/agent name (used as pane name)"},
+                                "prompt": {"type": "string", "description": "Task prompt for the agent"},
+                                "model": {"type": "string", "description": "Model to use (default: claude-sonnet-4-22k-0514)"},
+                                "cwd": {"type": "string", "description": "Working directory for agent"},
+                            },
+                            "required": ["name", "prompt"],
+                        },
+                    },
+                    "tab": {"type": "string", "description": "Tab name for agents (default: agents)", "default": "agents"},
+                    "dangerously_skip_permissions": {"type": "boolean", "description": "Run with --dangerously-skip-permissions", "default": False},
+                },
+                "required": ["tasks"],
+            },
+        ),
+        Tool(
+            name="list_spawned_agents",
+            description="List all spawned agents and their status",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="agent_output",
+            description="Read output from a spawned agent's pane",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Agent name"},
+                    "tail": {"type": "integer", "description": "Last N lines (default: 50)", "default": 50},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="stop_agent",
+            description="Stop a running agent (sends Ctrl+C)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Agent name to stop"},
+                },
+                "required": ["name"],
             },
         ),
         # === COMPOUND OPERATIONS (run in agent session by default) ===
@@ -2396,6 +2464,160 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result = {"success": False, "error": str(e)}
         else:
             result = {"success": False, "error": f"Unknown action: {action}"}
+
+    elif name == "spawn_agents":
+        # Spawn multiple Claude agents in parallel
+        session = get_agent_session()
+        tasks = arguments.get("tasks", [])
+        tab = arguments.get("tab", "agents")
+        skip_permissions = arguments.get("dangerously_skip_permissions", False)
+
+        if not tasks:
+            result = {"success": False, "error": "No tasks provided"}
+        else:
+            # Ensure agent session exists
+            ensure_agent_session()
+
+            # Create tab for agents if needed
+            layout_result = zellij_action("dump-layout", capture=True, session=session)
+            if layout_result.get("success") and f'name="{tab}"' not in layout_result.get("stdout", ""):
+                zellij_action("new-tab", "--name", tab, session=session)
+            else:
+                zellij_action("go-to-tab-name", tab, session=session)
+
+            spawned = []
+            for i, task in enumerate(tasks):
+                task_name = task.get("name", f"agent-{i}")
+                prompt = task.get("prompt", "")
+                model = task.get("model", "claude-sonnet-4-22k-0514")
+                cwd = task.get("cwd")
+
+                # Build claude command
+                claude_args = ["claude", "--model", model, "--print"]
+                if skip_permissions:
+                    claude_args.append("--dangerously-skip-permissions")
+
+                # Escape prompt for shell
+                escaped_prompt = prompt.replace("'", "'\"'\"'")
+                claude_cmd = " ".join(claude_args) + f" '{escaped_prompt}'"
+
+                # Determine direction for grid layout
+                direction = calculate_grid_direction(i)
+
+                # Create pane with claude command
+                pane_name = f"agent-{task_name}"
+                args = ["run", "--name", pane_name]
+                if direction and i > 0:
+                    args.extend(["--direction", direction])
+                if cwd:
+                    args.extend(["--cwd", cwd])
+                args.extend(["--", "bash", "-c", claude_cmd])
+
+                create_result = run_zellij(*args, session=session)
+
+                if create_result.get("success"):
+                    # Register the agent
+                    agent = SpawnedAgent(
+                        name=task_name,
+                        pane_name=pane_name,
+                        task=task_name,
+                        prompt=prompt,
+                        model=model,
+                        tab=tab,
+                    )
+                    with state._lock:
+                        state.spawned_agents[task_name] = agent
+
+                    # Also register as pane for read operations
+                    state.register_pane(pane_name, tab, command="claude")
+
+                    spawned.append({
+                        "name": task_name,
+                        "pane": pane_name,
+                        "model": model,
+                        "prompt": prompt[:100] + "..." if len(prompt) > 100 else prompt,
+                    })
+
+            result = {
+                "success": True,
+                "spawned": len(spawned),
+                "agents": spawned,
+                "tab": tab,
+                "session": session,
+            }
+            layout_cache.invalidate(session)
+
+    elif name == "list_spawned_agents":
+        with state._lock:
+            agents_list = []
+            for name, agent in state.spawned_agents.items():
+                agents_list.append({
+                    "name": agent.name,
+                    "pane": agent.pane_name,
+                    "task": agent.task,
+                    "model": agent.model,
+                    "status": agent.status,
+                    "spawned_at": agent.spawned_at,
+                    "tab": agent.tab,
+                    "prompt": agent.prompt[:80] + "..." if len(agent.prompt) > 80 else agent.prompt,
+                })
+        result = {"success": True, "agents": agents_list, "count": len(agents_list)}
+
+    elif name == "agent_output":
+        agent_name = arguments["name"]
+        tail_lines = arguments.get("tail", 50)
+
+        with state._lock:
+            agent = state.spawned_agents.get(agent_name)
+
+        if not agent:
+            result = {"success": False, "error": f"Agent '{agent_name}' not found"}
+        else:
+            session = get_agent_session()
+
+            async def do_read():
+                args = ["dump-screen", "/dev/stdout", "--full"]
+                return zellij_action(*args, capture=True, session=session)
+
+            read_result = await with_pane_focus(agent.pane_name, do_read, session=session)
+
+            if read_result.get("success"):
+                content = strip_ansi(read_result.get("stdout", ""))
+                lines = content.split('\n')
+                if tail_lines:
+                    lines = lines[-tail_lines:]
+                result = {
+                    "success": True,
+                    "agent": agent_name,
+                    "output": '\n'.join(lines),
+                    "lines": len(lines),
+                }
+            else:
+                result = read_result
+
+    elif name == "stop_agent":
+        agent_name = arguments["name"]
+
+        with state._lock:
+            agent = state.spawned_agents.get(agent_name)
+
+        if not agent:
+            result = {"success": False, "error": f"Agent '{agent_name}' not found"}
+        else:
+            session = get_agent_session()
+
+            async def do_interrupt():
+                return zellij_action("write", "3", session=session)  # Ctrl+C
+
+            interrupt_result = await with_pane_focus(agent.pane_name, do_interrupt, session=session)
+
+            if interrupt_result.get("success"):
+                with state._lock:
+                    if agent_name in state.spawned_agents:
+                        state.spawned_agents[agent_name].status = "stopped"
+                result = {"success": True, "stopped": agent_name}
+            else:
+                result = interrupt_result
 
     else:
         result = {"success": False, "error": f"Unknown tool: {name}"}

@@ -132,7 +132,7 @@ def is_plugin_available() -> bool:
     return _plugin_available
 
 
-def plugin_command(cmd: str, payload: dict = None, timeout: float = 2.0, session: str = None) -> dict:
+def plugin_command(cmd: str, payload: dict = None, timeout: float = 5.0, session: str = None) -> dict:
     """Execute a command via the pane-bridge plugin.
 
     Returns dict with success/error/data fields.

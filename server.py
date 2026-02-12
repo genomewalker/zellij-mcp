@@ -132,13 +132,19 @@ def is_plugin_available() -> bool:
     return _plugin_available
 
 
-def plugin_command(cmd: str, payload: dict = None, timeout: float = 2.0) -> dict:
+def plugin_command(cmd: str, payload: dict = None, timeout: float = 2.0, session: str = None) -> dict:
     """Execute a command via the pane-bridge plugin.
 
     Returns dict with success/error/data fields.
 
     Note: zellij pipe outputs data but doesn't exit on its own. We use the
     shell `timeout` command to force termination after getting the output.
+
+    Args:
+        cmd: Plugin command name
+        payload: JSON payload to send
+        timeout: Timeout in seconds
+        session: Target session (default: current session)
     """
     if not is_plugin_available():
         return {"success": False, "error": "pane-bridge plugin not installed"}
@@ -147,11 +153,15 @@ def plugin_command(cmd: str, payload: dict = None, timeout: float = 2.0) -> dict
     payload_json = json.dumps(payload) if payload else "{}"
 
     try:
-        # Use shell with timeout command - this is the only reliable way to get
-        # output from zellij pipe which hangs after outputting data.
         # Escape single quotes in payload for shell safety
         escaped_payload = payload_json.replace("'", "'\"'\"'")
-        shell_cmd = f"echo '{escaped_payload}' | timeout {int(timeout)} zellij pipe -p '{plugin_url}' -n {cmd}"
+
+        # Add session targeting if specified
+        session_flag = f"-s '{session}'" if session else ""
+
+        # IMPORTANT: zellij pipe expects payload as positional arg after --, NOT via stdin
+        # The stdin pipe method only works for streaming mode, not one-shot commands
+        shell_cmd = f"timeout {int(timeout)} zellij {session_flag} pipe -p '{plugin_url}' -n {cmd} -- '{escaped_payload}'"
 
         result = subprocess.run(
             ["bash", "-c", shell_cmd],
@@ -179,27 +189,27 @@ def plugin_command(cmd: str, payload: dict = None, timeout: float = 2.0) -> dict
         return {"success": False, "error": str(e)}
 
 
-def plugin_write_to_pane(pane_id: int, chars: str) -> dict:
+def plugin_write_to_pane(pane_id: int, chars: str, session: str = None) -> dict:
     """Write characters to a pane by ID without focus stealing."""
-    return plugin_command("write", {"pane_id": pane_id, "chars": chars})
+    return plugin_command("write", {"pane_id": pane_id, "chars": chars}, session=session)
 
 
-def plugin_list_panes() -> dict:
+def plugin_list_panes(session: str = None) -> dict:
     """Get list of all panes via plugin."""
-    return plugin_command("list")
+    return plugin_command("list", session=session)
 
 
-def plugin_get_protected() -> dict:
+def plugin_get_protected(session: str = None) -> dict:
     """Get the protected (Claude) pane ID."""
-    return plugin_command("get_protected")
+    return plugin_command("get_protected", session=session)
 
 
-def plugin_find_pane_id(name: str) -> Optional[int]:
+def plugin_find_pane_id(name: str, session: str = None) -> Optional[int]:
     """Find a pane ID by name/title/command using the plugin.
 
     Returns the pane ID if found, None otherwise.
     """
-    result = plugin_list_panes()
+    result = plugin_list_panes(session=session)
     if not result.get("success") or not result.get("data"):
         return None
 
@@ -1682,7 +1692,27 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return zellij_action(*args, capture=True, session=session)
 
         if pane_name:
-            result = await with_pane_focus(pane_name, do_read, session=session)
+            # Try plugin-based focus first (more reliable pane lookup by title)
+            if is_plugin_available():
+                pane_id = plugin_find_pane_id(pane_name, session=session)
+                if pane_id is not None:
+                    # Focus via plugin, then read
+                    focus_result = plugin_command("focus", {"pane_id": pane_id}, session=session)
+                    if focus_result.get("success"):
+                        result = await do_read()
+                        result["method"] = "plugin"
+                    else:
+                        # Plugin focus failed, fall back to with_pane_focus
+                        result = await with_pane_focus(pane_name, do_read, session=session)
+                        result["method"] = "focus_fallback"
+                else:
+                    # Pane not found via plugin, try focus method
+                    result = await with_pane_focus(pane_name, do_read, session=session)
+                    result["method"] = "focus"
+            else:
+                # Plugin not available
+                result = await with_pane_focus(pane_name, do_read, session=session)
+                result["method"] = "focus"
         else:
             result = await do_read()
 
@@ -1737,9 +1767,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         # Try plugin first (no focus stealing)
         if is_plugin_available():
-            pane_id = plugin_find_pane_id(pane_name)
+            pane_id = plugin_find_pane_id(pane_name, session=session)
             if pane_id is not None:
-                result = plugin_write_to_pane(pane_id, chars)
+                result = plugin_write_to_pane(pane_id, chars, session=session)
                 if result.get("success"):
                     result["method"] = "plugin"
                 else:

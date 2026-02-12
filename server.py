@@ -1184,29 +1184,52 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # === PANE MANAGEMENT ===
     if name == "new_pane":
-        args = ["new-pane"]
-        if arguments.get("floating"):
-            args.append("--floating")
-        if arguments.get("in_place"):
-            args.append("--in-place")
-        if arguments.get("direction"):
-            args.extend(["--direction", arguments["direction"]])
-        if arguments.get("cwd"):
-            args.extend(["--cwd", arguments["cwd"]])
-        if arguments.get("name"):
-            args.extend(["--name", arguments["name"]])
-        if arguments.get("close_on_exit"):
-            args.append("--close-on-exit")
-        if arguments.get("start_suspended"):
-            args.append("--start-suspended")
-        if arguments.get("command"):
-            command = arguments["command"]
-            # Complex commands (with spaces, pipes, &&, etc.) need shell wrapping
+        command = arguments.get("command")
+        start_suspended = arguments.get("start_suspended", False)
+
+        # Use 'zellij run' when command specified (unless explicitly suspended)
+        # 'zellij action new-pane' creates suspended panes in detached sessions
+        if command and not start_suspended:
+            args = ["run"]
+            if arguments.get("floating"):
+                args.append("--floating")
+            if arguments.get("direction"):
+                args.extend(["--direction", arguments["direction"]])
+            if arguments.get("cwd"):
+                args.extend(["--cwd", arguments["cwd"]])
+            if arguments.get("name"):
+                args.extend(["--name", arguments["name"]])
+            if arguments.get("close_on_exit"):
+                args.append("--close-on-exit")
+            # Complex commands need shell wrapping
             if any(c in command for c in [' ', '|', '&', ';', '>', '<', '$', '`']):
                 args.extend(["--", "bash", "-c", command])
             else:
                 args.extend(["--", command])
-        result = zellij_action(*args, session=session)
+            result = run_zellij(*args, session=session)
+        else:
+            # No command or explicitly suspended - use new-pane
+            args = ["new-pane"]
+            if arguments.get("floating"):
+                args.append("--floating")
+            if arguments.get("in_place"):
+                args.append("--in-place")
+            if arguments.get("direction"):
+                args.extend(["--direction", arguments["direction"]])
+            if arguments.get("cwd"):
+                args.extend(["--cwd", arguments["cwd"]])
+            if arguments.get("name"):
+                args.extend(["--name", arguments["name"]])
+            if arguments.get("close_on_exit"):
+                args.append("--close-on-exit")
+            if start_suspended:
+                args.append("--start-suspended")
+            if command:
+                if any(c in command for c in [' ', '|', '&', ';', '>', '<', '$', '`']):
+                    args.extend(["--", "bash", "-c", command])
+                else:
+                    args.extend(["--", command])
+            result = zellij_action(*args, session=session)
 
     elif name == "close_pane":
         result = zellij_action("close-pane", session=session)
@@ -1715,21 +1738,32 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     direction = calculate_grid_direction(len(panes))
 
             # Create the pane
-            args = ["new-pane", "--name", pane_name]
-            if floating:
-                args.append("--floating")
-            if direction:
-                args.extend(["--direction", direction])
-            if cwd:
-                args.extend(["--cwd", cwd])
+            # Use 'zellij run' when command specified to avoid suspended panes in detached sessions
+            # 'zellij action new-pane' creates suspended panes, 'zellij run' starts immediately
             if command:
-                # Complex commands (with spaces, pipes, &&, etc.) need shell wrapping
+                args = ["run", "--name", pane_name]
+                if floating:
+                    args.append("--floating")
+                if direction:
+                    args.extend(["--direction", direction])
+                if cwd:
+                    args.extend(["--cwd", cwd])
+                # Complex commands need shell wrapping
                 if any(c in command for c in [' ', '|', '&', ';', '>', '<', '$', '`']):
                     args.extend(["--", "bash", "-c", command])
                 else:
                     args.extend(["--", command])
-
-            create_result = zellij_action(*args, session=session)
+                create_result = run_zellij(*args, session=session)
+            else:
+                # No command - use new-pane for an empty shell
+                args = ["action", "new-pane", "--name", pane_name]
+                if floating:
+                    args.append("--floating")
+                if direction:
+                    args.extend(["--direction", direction])
+                if cwd:
+                    args.extend(["--cwd", cwd])
+                create_result = run_zellij(*args, session=session)
             if create_result.get("success"):
                 # Rename pane to ensure name persists in layout
                 zellij_action("rename-pane", pane_name, session=session)
@@ -1925,8 +1959,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         ssh_args.append(host)
         ssh_cmd = " ".join(ssh_args)  # For display/registry
 
-        # Create pane with SSH command
-        args = ["new-pane", "--name", ssh_name, "--"] + ssh_args
+        # Create pane with SSH command using 'zellij run' to avoid suspended panes
+        # 'zellij action new-pane' creates suspended panes in detached sessions
+        args = ["run", "--name", ssh_name, "--"] + ssh_args
 
         if tab:
             layout_result = zellij_action("dump-layout", capture=True, session=session)
@@ -1938,7 +1973,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             else:
                 zellij_action("go-to-tab-name", tab, session=session)
 
-        create_result = zellij_action(*args, session=session)
+        create_result = run_zellij(*args, session=session)
         if create_result.get("success"):
             # Rename pane to ensure name persists in layout
             zellij_action("rename-pane", ssh_name, session=session)

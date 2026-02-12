@@ -34,7 +34,15 @@ def get_active_sessions() -> list[str]:
             capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0:
-            return [s.strip() for s in result.stdout.strip().split('\n') if s.strip()]
+            # Parse session name (first word before space/bracket)
+            sessions = []
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    # Extract just the session name (first token)
+                    name = line.strip().split()[0] if line.strip() else ""
+                    if name:
+                        sessions.append(name)
+            return sessions
     except Exception:
         pass
     return []

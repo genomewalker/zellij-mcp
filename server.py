@@ -2282,73 +2282,97 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "tabs": tabs,
                 })
 
-            # ANSI color codes
-            ORANGE = "\033[38;5;208m"
-            GREEN = "\033[38;5;82m"
-            DIM = "\033[38;5;240m"
-            BOLD = "\033[1m"
-            RESET = "\033[0m"
+            # ANSI colors
+            O = "\033[38;5;208m"  # orange
+            G = "\033[38;5;82m"   # green
+            D = "\033[38;5;240m"  # dim
+            B = "\033[1m"         # bold
+            R = "\033[0m"         # reset
 
-            # Generate session map with colors
-            W = 70  # Width
+            W = 68  # inner width
+
+            def row(content: str, visible_len: int) -> str:
+                """Build a row with proper padding."""
+                pad = W - visible_len
+                return f"{D}│{R} {content}{' ' * pad} {D}│{R}"
+
+            def sep(char: str = "─", left: str = "├", right: str = "┤") -> str:
+                return f"{D}{left}{char * W}{right}{R}"
+
             lines = []
-
-            lines.append(f"{DIM}┌{'─'*(W-2)}┐{RESET}")
-            lines.append(f"{DIM}│{RESET} {ORANGE}{BOLD}SESSION MAP{RESET}{' '*(W-14)}{DIM}│{RESET}")
-            lines.append(f"{DIM}├{'─'*(W-2)}┤{RESET}")
+            lines.append(f"{D}┌{'─' * W}┐{R}")
+            lines.append(row(f"{O}{B}SESSION MAP{R}", 11))
+            lines.append(sep())
 
             for i, sess in enumerate(session_maps):
-                is_agent = sess["name"] == "zellij-agent"
+                name = sess["name"]
+                is_agent = name == "zellij-agent"
                 is_current = sess["current"]
 
-                # Session header with status
+                # Build session line: "  name [AGENT]          ● ACTIVE"
+                left = f"  {B}{name}{R}"
+                left_len = 2 + len(name)
+
+                if is_agent:
+                    left += f" {O}[AGENT]{R}"
+                    left_len += 8
+
                 if is_current:
-                    status = f"{GREEN}● ACTIVE{RESET}"
-                    status_len = 8
+                    right = f"{G}● ACTIVE{R}"
+                    right_len = 8
                 else:
-                    status = f"{DIM}○ idle{RESET}"
-                    status_len = 6
+                    right = f"{D}○ idle{R}"
+                    right_len = 6
 
-                badge = f" {ORANGE}[AGENT]{RESET}" if is_agent else ""
-                badge_len = 8 if is_agent else 0
+                mid_pad = W - left_len - right_len
+                lines.append(f"{D}│{R}{left}{' ' * mid_pad}{right}{D}│{R}")
 
-                name_part = f"{BOLD}{sess['name']}{RESET}"
-                padding = W - 4 - len(sess['name']) - badge_len - status_len
-                lines.append(f"{DIM}│{RESET}  {name_part}{badge}{' '*padding}{status} {DIM}│{RESET}")
-
+                # CWD
                 if sess["cwd"]:
-                    cwd_short = sess["cwd"]
-                    if len(cwd_short) > W - 10:
-                        cwd_short = "..." + cwd_short[-(W-13):]
-                    cwd_line = f"  {DIM}└─{RESET} {cwd_short}"
-                    lines.append(f"{DIM}│{RESET}{cwd_line}{' '*(W-4-len(cwd_short))}{DIM}│{RESET}")
+                    cwd = sess["cwd"]
+                    max_cwd = W - 8
+                    if len(cwd) > max_cwd:
+                        cwd = "..." + cwd[-(max_cwd - 3):]
+                    cwd_line = f"    {D}└─{R} {cwd}"
+                    lines.append(row(cwd_line, 7 + len(cwd)))
 
+                # Tabs
                 for tab in sess["tabs"]:
-                    focus = f"{ORANGE}►{RESET}" if tab["focused"] else " "
-                    tab_name = f"[{tab['name']}]"
-                    tab_line = f"   {focus} {tab_name}"
-                    lines.append(f"{DIM}│{RESET}{tab_line}{' '*(W-5-len(tab_name))}{DIM}│{RESET}")
+                    is_focused = tab["focused"]
+                    tname = tab["name"]
+
+                    if is_focused:
+                        tab_line = f"    {O}►{R} [{tname}]"
+                        tab_len = 7 + len(tname)
+                    else:
+                        tab_line = f"      [{tname}]"
+                        tab_len = 8 + len(tname)
+
+                    lines.append(row(tab_line, tab_len))
 
                     if not compact:
                         panes = tab["panes"] if tab["panes"] else ["shell"]
-                        for pane in panes[:6]:
-                            pane_short = pane[:W-12] if len(pane) > W-12 else pane
-                            lines.append(f"{DIM}│{RESET}       {DIM}├─{RESET} {pane_short}{' '*(W-10-len(pane_short))}{DIM}│{RESET}")
+                        for j, pane in enumerate(panes[:5]):
+                            max_pane = W - 14
+                            p = pane[:max_pane] if len(pane) > max_pane else pane
+                            pane_line = f"        {D}├─{R} {p}"
+                            lines.append(row(pane_line, 12 + len(p)))
 
-                        if len(panes) > 6:
-                            more = f"... +{len(panes)-6} more"
-                            lines.append(f"{DIM}│{RESET}       {DIM}└─{RESET} {more}{' '*(W-10-len(more))}{DIM}│{RESET}")
+                        if len(panes) > 5:
+                            more = f"+{len(panes) - 5} more"
+                            lines.append(row(f"        {D}└─{R} {more}", 12 + len(more)))
 
                         if tab["floating"]:
-                            fl = f"{ORANGE}~{RESET} {len(tab['floating'])} floating"
-                            lines.append(f"{DIM}│{RESET}       {fl}{' '*(W-18)}{DIM}│{RESET}")
+                            n = len(tab["floating"])
+                            fl_line = f"        {O}~{R} {n} floating"
+                            lines.append(row(fl_line, 12 + len(str(n)) + 9))
 
                 if i < len(session_maps) - 1:
-                    lines.append(f"{DIM}├{'─'*(W-2)}┤{RESET}")
+                    lines.append(sep())
 
-            lines.append(f"{DIM}└{'─'*(W-2)}┘{RESET}")
+            lines.append(f"{D}└{'─' * W}┘{R}")
             lines.append("")
-            lines.append(f"{ORANGE}►{RESET} focused  {GREEN}●{RESET} current  {ORANGE}~{RESET} floating")
+            lines.append(f"{O}►{R} focused  {G}●{R} current  {O}~{R} floating")
 
             result = {
                 "success": True,

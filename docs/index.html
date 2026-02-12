@@ -3,23 +3,32 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>zellij-mcp</title>
-<meta name="description" content="Claude controls Zellij terminal multiplexer via MCP.">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<title>zellij-mcp · Terminal Orchestration for Claude</title>
+<meta name="description" content="57 MCP tools for autonomous terminal control. Agent isolation, REPL interaction, SSH/HPC workflows.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
   --orange: #f97316;
+  --orange-dim: #9a4a0f;
+  --orange-glow: rgba(249, 115, 22, 0.2);
   --orange-bright: #fb923c;
-  --orange-glow: rgba(249, 115, 22, 0.4);
   --green: #22c55e;
-  --blue: #3b82f6;
+  --cyan: #00d4ff;
+  --red: #ff3366;
+  --bg-deep: #050505;
   --bg: #0a0a0a;
-  --bg-card: #111;
-  --bg-code: #0d0d0d;
-  --border: #222;
-  --text: #888;
-  --text-bright: #eee;
-  --mono: "JetBrains Mono", monospace;
+  --bg-elevated: #111;
+  --bg-pane: #0c0c0c;
+  --border: #1a1a1a;
+  --border-active: #2a2a2a;
+  --text-dim: #444;
+  --text: #666;
+  --text-bright: #999;
+  --white: #e0e0e0;
+  --mono: "IBM Plex Mono", monospace;
+  --display: "Space Grotesk", sans-serif;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -27,770 +36,1381 @@ html { scroll-behavior: smooth; }
 
 body {
   font-family: var(--mono);
-  background: var(--bg);
+  background: var(--bg-deep);
   color: var(--text);
   font-size: 14px;
   line-height: 1.6;
   overflow-x: hidden;
 }
 
-::selection { background: var(--orange); color: #000; }
-
-a { color: var(--orange); text-decoration: none; }
-a:hover { text-decoration: underline; }
-
-/* Grid background */
-.grid-bg {
+/* CRT Scan Lines Overlay */
+body::before {
+  content: "";
   position: fixed;
   inset: 0;
-  background-image:
-    linear-gradient(rgba(249,115,22,0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(249,115,22,0.03) 1px, transparent 1px);
-  background-size: 60px 60px;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.15) 2px,
+    rgba(0, 0, 0, 0.15) 4px
+  );
   pointer-events: none;
-  z-index: -1;
+  z-index: 10000;
 }
 
-/* Header */
+/* Subtle vignette */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 0%, rgba(0,0,0,0.4) 100%);
+  pointer-events: none;
+  z-index: 9999;
+}
+
+::selection { background: var(--orange); color: #000; }
+
+a { color: var(--orange); text-decoration: none; transition: all 0.2s; }
+a:hover { color: var(--orange-bright); text-shadow: 0 0 10px var(--orange-glow); }
+
+/* Header - Terminal Tab Bar Style */
 header {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  z-index: 100;
-  padding: 16px 32px;
+  z-index: 1000;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: rgba(10,10,10,0.8);
-  backdrop-filter: blur(10px);
+  align-items: stretch;
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
+  height: 44px;
 }
 
-.logo {
-  font-weight: 700;
-  font-size: 16px;
-  color: var(--text-bright);
+.header-tab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px;
+  border-right: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
 }
 
-.logo span { color: var(--orange); }
+.header-tab:hover { background: var(--bg-elevated); }
 
-nav { display: flex; gap: 32px; }
-nav a { color: var(--text); font-size: 13px; }
-nav a:hover { color: var(--orange); text-decoration: none; }
+.header-tab.active {
+  background: var(--bg-elevated);
+  color: var(--orange);
+}
 
-.gh-link {
+.header-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--orange);
+  box-shadow: 0 0 10px var(--orange-glow);
+}
+
+.header-tab .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.header-tab.active .dot { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+
+.header-spacer { flex: 1; }
+
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.status-item { display: flex; align-items: center; gap: 6px; }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; }
+.status-dot.green { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+.status-dot.amber { background: var(--green); }
+
+.gh-btn {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 0 20px;
+  height: 100%;
+  border-left: 1px solid var(--border);
   color: var(--text);
-  font-size: 13px;
+  font-size: 12px;
+  transition: all 0.2s;
 }
-.gh-link:hover { color: var(--text-bright); text-decoration: none; }
+.gh-btn:hover { background: var(--bg-elevated); color: var(--white); }
+.gh-btn svg { opacity: 0.6; }
+.gh-btn:hover svg { opacity: 1; }
 
-/* Hero */
+/* Main Layout - Pane Grid */
+main {
+  margin-top: 44px;
+}
+
+/* Hero Section */
 .hero {
-  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  min-height: calc(100vh - 44px);
+  border-bottom: 1px solid var(--border);
+}
+
+.hero-left {
+  padding: 80px 60px;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  align-items: center;
-  text-align: center;
-  padding: 120px 24px 80px;
+  border-right: 1px solid var(--border);
   position: relative;
 }
 
-.hero::before {
-  content: "";
+.hero-left::before {
+  content: "01";
   position: absolute;
-  top: 20%;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 600px;
-  height: 600px;
-  background: radial-gradient(circle, var(--orange-glow) 0%, transparent 70%);
-  opacity: 0.3;
-  pointer-events: none;
-  animation: pulse 4s ease-in-out infinite;
+  top: 20px;
+  left: 20px;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 0.2; transform: translateX(-50%) scale(1); }
-  50% { opacity: 0.4; transform: translateX(-50%) scale(1.1); }
-}
-
-.hero h1 {
-  font-size: clamp(48px, 10vw, 100px);
-  font-weight: 700;
-  color: var(--text-bright);
-  letter-spacing: -4px;
-  margin-bottom: 16px;
-  position: relative;
-}
-
-.hero h1 .dash {
+.version-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(249, 115, 22, 0.08);
+  border: 1px solid var(--orange-dim);
+  border-radius: 4px;
+  font-size: 11px;
   color: var(--orange);
-  text-shadow: 0 0 30px var(--orange-glow);
+  margin-bottom: 32px;
+  width: fit-content;
 }
 
-.tagline {
-  font-size: clamp(16px, 3vw, 22px);
+.version-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: var(--orange);
+  border-radius: 50%;
+  animation: pulse-dot 2s infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.hero-title {
+  font-family: var(--display);
+  font-size: clamp(42px, 6vw, 72px);
+  font-weight: 700;
+  color: var(--white);
+  line-height: 1.1;
+  margin-bottom: 8px;
+  letter-spacing: -2px;
+}
+
+.hero-title span {
+  color: var(--orange);
+  text-shadow: 0 0 30px var(--orange-glow), 0 0 60px var(--orange-glow);
+}
+
+.hero-sub {
+  font-family: var(--display);
+  font-size: clamp(18px, 2.5vw, 26px);
+  color: var(--text-bright);
+  margin-bottom: 32px;
+  font-weight: 400;
+}
+
+.hero-desc {
+  font-size: 14px;
   color: var(--text);
-  margin-bottom: 48px;
-  max-width: 550px;
+  line-height: 1.8;
+  max-width: 420px;
+  margin-bottom: 40px;
 }
 
-.tagline strong {
-  color: var(--green);
+.hero-desc strong { color: var(--orange); font-weight: 500; }
+
+.hero-stats {
+  display: flex;
+  gap: 40px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
 }
 
-/* Demo terminal */
-.demo {
-  width: 100%;
-  max-width: 900px;
-  background: var(--bg-code);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow: 0 40px 80px rgba(0,0,0,0.5), 0 0 0 1px rgba(249,115,22,0.1);
-  margin-bottom: 48px;
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.demo-bar {
+.stat-value {
+  font-family: var(--display);
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--orange);
+  text-shadow: 0 0 20px var(--orange-glow);
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* Hero Right - Terminal Demo */
+.hero-right {
+  background: var(--bg);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.hero-right::before {
+  content: "LIVE DEMO";
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 14px 18px;
-  background: #151515;
-  border-bottom: 1px solid var(--border);
 }
 
-.demo-dot { width: 12px; height: 12px; border-radius: 50%; background: #333; }
-.demo-dot.r { background: #ff5f57; }
-.demo-dot.y { background: #febc2e; }
-.demo-dot.g { background: #28c840; }
+.hero-right::after {
+  content: "";
+  position: absolute;
+  top: 20px;
+  right: 88px;
+  width: 6px;
+  height: 6px;
+  background: var(--orange);
+  border-radius: 50%;
+  animation: pulse-dot 1.5s infinite;
+}
 
-.demo-title {
+/* Terminal Pane Grid */
+.terminal-grid {
   flex: 1;
-  text-align: center;
-  font-size: 12px;
-  color: #555;
-  margin-right: 48px;
-}
-
-.demo-layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
-  min-height: 300px;
+  gap: 1px;
+  background: var(--border);
+  margin: 60px 20px 20px;
+  border: 1px solid var(--border);
 }
 
-.pane {
+.term-pane {
+  background: var(--bg-pane);
   padding: 16px;
   font-size: 12px;
-  border: 1px solid var(--border);
   position: relative;
+  overflow: hidden;
 }
 
-.pane-label {
-  position: absolute;
-  top: 8px;
-  right: 8px;
+.term-pane.main { grid-row: span 2; }
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pane-title {
   font-size: 10px;
-  color: #444;
-  background: #181818;
-  padding: 2px 8px;
-  border-radius: 4px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
-.pane.claude { background: #0f0f0f; grid-column: 1; grid-row: 1 / 3; }
-.pane.nvim { background: #0a0a0a; }
-.pane.tests { background: #0a0a0a; }
-
-.pane.highlight { border-color: var(--orange); animation: pane-flash 0.6s ease; }
-
-@keyframes pane-flash {
-  0% { border-color: var(--orange); box-shadow: inset 0 0 20px rgba(249,115,22,0.2); }
-  100% { border-color: var(--orange); box-shadow: none; }
+.pane-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
 }
 
-.prompt { color: var(--green); }
-.cmd { color: var(--text-bright); }
-.output { color: #666; }
+.pane-indicator.active { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+.pane-indicator.amber { background: var(--green); }
 
-.cursor {
+/* Active pane glow effect */
+.term-pane.active-pane {
+  border: 1px solid var(--orange) !important;
+  box-shadow: inset 0 0 30px rgba(249, 115, 22, 0.15), 0 0 20px rgba(249, 115, 22, 0.2);
+}
+
+.term-pane.active-pane .pane-header {
+  border-bottom-color: var(--orange-dim);
+}
+
+.term-pane.active-pane .pane-title {
+  color: var(--orange);
+}
+
+.term-line { margin-bottom: 4px; line-height: 1.5; }
+.term-prompt { color: var(--orange); }
+.term-cmd { color: var(--white); }
+.term-output { color: var(--text); }
+.term-success { color: var(--orange); }
+.term-info { color: var(--cyan); }
+.term-warn { color: var(--green); }
+.term-dim { color: var(--text-dim); }
+
+.term-cursor {
   display: inline-block;
   width: 8px;
   height: 14px;
   background: var(--orange);
-  margin-left: 2px;
   animation: blink 1s step-end infinite;
   vertical-align: middle;
+  margin-left: 2px;
 }
 
 @keyframes blink { 50% { opacity: 0; } }
 
-.replay {
+/* Session Map Mini */
+.session-map {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.session-map-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+
+.session-map-header .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--orange);
+  box-shadow: 0 0 6px var(--orange);
+}
+
+.session-map-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.map-pane {
+  padding: 8px 10px;
+  background: var(--bg-pane);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-size: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.map-pane.active {
+  border-color: var(--orange);
+  box-shadow: 0 0 8px rgba(249, 115, 22, 0.2);
+}
+
+.map-pane .name {
+  color: var(--text-bright);
+  font-weight: 500;
+}
+
+.map-pane.active .name {
+  color: var(--orange);
+}
+
+.map-pane .status {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.map-pane.active .status {
+  color: var(--green);
+}
+
+/* Install Section */
+.install-section {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  border-bottom: 1px solid var(--border);
+}
+
+.install-left {
+  padding: 80px 40px;
+  border-right: 1px solid var(--border);
+  position: relative;
+}
+
+.install-left::before {
+  content: "02";
   position: absolute;
-  bottom: 16px;
-  right: 16px;
-  background: #181818;
-  border: 1px solid #333;
-  color: #666;
-  padding: 8px 14px;
-  font-family: var(--mono);
-  font-size: 11px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.replay:hover { border-color: var(--orange); color: var(--orange); }
-
-/* Scroll hint */
-.scroll-hint {
-  position: absolute;
-  bottom: 40px;
-  left: 50%;
-  transform: translateX(-50%);
-  color: #444;
-  font-size: 12px;
-  animation: bounce 2s infinite;
+  top: 20px;
+  left: 20px;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
 }
 
-@keyframes bounce {
-  0%, 100% { transform: translateX(-50%) translateY(0); }
-  50% { transform: translateX(-50%) translateY(8px); }
-}
-
-/* Install section */
-.install {
-  padding: 120px 24px;
-  max-width: 900px;
-  margin: 0 auto;
-}
-
-.install h2 {
-  font-size: 14px;
+.section-label {
+  font-size: 10px;
   color: var(--orange);
   text-transform: uppercase;
-  letter-spacing: 3px;
-  margin-bottom: 12px;
+  letter-spacing: 2px;
+  margin-bottom: 16px;
 }
 
-.install h3 {
-  font-size: clamp(28px, 5vw, 40px);
-  color: var(--text-bright);
+.section-title {
+  font-family: var(--display);
+  font-size: 28px;
   font-weight: 600;
-  margin-bottom: 48px;
-  letter-spacing: -1px;
+  color: var(--white);
+  line-height: 1.3;
 }
 
-.steps {
+.install-right {
+  padding: 80px 60px;
   display: flex;
   flex-direction: column;
-  gap: 32px;
+  gap: 24px;
 }
 
-.step {
+.install-step {
   display: grid;
-  grid-template-columns: 48px 1fr;
-  gap: 24px;
+  grid-template-columns: 40px 1fr;
+  gap: 20px;
   align-items: start;
 }
 
 .step-num {
-  width: 48px;
-  height: 48px;
+  width: 40px;
+  height: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 2px solid var(--border);
-  border-radius: 50%;
-  font-size: 18px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 14px;
   font-weight: 600;
-  color: var(--orange);
 }
 
 .step-content h4 {
-  font-size: 16px;
-  color: var(--text-bright);
-  margin-bottom: 8px;
-  font-weight: 600;
-}
-
-.step-content p {
-  color: var(--text);
-  margin-bottom: 16px;
   font-size: 14px;
+  color: var(--white);
+  margin-bottom: 8px;
+  font-weight: 500;
 }
 
 .code-block {
-  background: var(--bg-code);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px 20px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  background: var(--bg-pane);
+  border: 1px solid var(--border);
+  padding: 12px 16px;
   gap: 16px;
 }
 
 .code-block code {
-  color: var(--text-bright);
-  font-size: 13px;
   flex: 1;
-  overflow-x: auto;
+  color: var(--orange);
+  font-size: 13px;
 }
 
-.code-block .comment { color: #555; }
-.code-block .url { color: var(--orange); }
-
-.copy {
+.code-block .copy-btn {
   background: transparent;
-  border: 1px solid #333;
-  color: #666;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
   padding: 6px 12px;
   font-family: var(--mono);
-  font-size: 11px;
-  border-radius: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
   cursor: pointer;
   transition: all 0.2s;
-  white-space: nowrap;
-}
-.copy:hover { border-color: var(--orange); color: var(--orange); }
-.copy.done { border-color: var(--orange); color: var(--orange); }
-
-.step-note {
-  font-size: 12px;
-  color: #555;
-  margin-top: 12px;
 }
 
-/* Features */
-.features {
-  padding: 120px 24px;
-  background: linear-gradient(180deg, transparent, rgba(249,115,22,0.02));
-}
-
-.features-inner {
-  max-width: 1100px;
-  margin: 0 auto;
-}
-
-.features h2 {
-  font-size: 14px;
+.code-block .copy-btn:hover {
+  border-color: var(--orange);
   color: var(--orange);
-  text-transform: uppercase;
-  letter-spacing: 3px;
-  margin-bottom: 16px;
-  text-align: center;
 }
 
-.section-subtitle {
-  text-align: center;
-  color: var(--text);
-  font-size: 15px;
-  margin-bottom: 48px;
-  max-width: 500px;
-  margin-left: auto;
-  margin-right: auto;
-}
-
-.feature-grid {
+/* Features Grid */
+.features-section {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 24px;
+  grid-template-columns: 300px 1fr;
+  border-bottom: 1px solid var(--border);
 }
 
-.feature {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 32px 28px;
+.features-left {
+  padding: 80px 40px;
+  border-right: 1px solid var(--border);
+  position: relative;
+}
+
+.features-left::before {
+  content: "03";
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
+}
+
+.features-right {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.feature-card {
+  padding: 40px;
+  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
   transition: all 0.3s;
+  position: relative;
 }
 
-.feature:hover {
-  border-color: #333;
-  transform: translateY(-4px);
+.feature-card:nth-child(2n) { border-right: none; }
+.feature-card:nth-last-child(-n+2) { border-bottom: none; }
+
+.feature-card:hover {
+  background: var(--bg-elevated);
 }
+
+.feature-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  height: 0;
+  background: var(--orange);
+  transition: height 0.3s;
+}
+
+.feature-card:hover::before { height: 100%; }
 
 .feature-icon {
-  font-size: 24px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
   margin-bottom: 20px;
+  font-size: 18px;
 }
 
-.feature h3 {
+.feature-card h3 {
   font-size: 15px;
-  color: var(--text-bright);
+  color: var(--white);
   margin-bottom: 10px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
-.feature p {
+.feature-card p {
   font-size: 13px;
   color: var(--text);
   line-height: 1.7;
 }
 
-/* Tools section */
-.tools {
-  padding: 80px 24px 120px;
-  max-width: 900px;
-  margin: 0 auto;
+/* Tools Section */
+.tools-section {
+  padding: 80px 60px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
 }
 
-.tools h2 {
-  font-size: 14px;
+.tools-section::before {
+  content: "04";
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
+}
+
+.tools-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 48px;
+}
+
+.tools-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+}
+
+.tool-category {
+  background: var(--bg);
+  padding: 24px;
+}
+
+.tool-category h4 {
+  font-size: 10px;
   color: var(--orange);
   text-transform: uppercase;
-  letter-spacing: 3px;
-  margin-bottom: 32px;
-  text-align: center;
+  letter-spacing: 1px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
 }
 
-.tool-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
+.tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .tool-item {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 14px 18px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-
-.tool-name {
-  background: #181818;
-  border: 1px solid #333;
-  padding: 6px 12px;
-  border-radius: 6px;
   font-size: 12px;
-  color: var(--orange);
-  font-weight: 500;
-  white-space: nowrap;
+  color: var(--text);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  transition: all 0.2s;
 }
 
-.tool-desc {
-  font-size: 13px;
-  color: var(--text);
+.tool-item:last-child { border-bottom: none; }
+
+.tool-item:hover {
+  color: var(--orange);
+  padding-left: 8px;
+}
+
+.tool-item code {
+  color: var(--white);
+  background: var(--bg-pane);
+  padding: 2px 6px;
+  font-size: 11px;
+  margin-right: 8px;
+}
+
+/* Workflow Section */
+.workflow-section {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 1px solid var(--border);
+}
+
+.workflow-left {
+  padding: 80px 60px;
+  border-right: 1px solid var(--border);
+  position: relative;
+}
+
+.workflow-left::before {
+  content: "05";
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
+}
+
+.workflow-example {
+  background: var(--bg-pane);
+  border: 1px solid var(--border);
+  padding: 20px;
+  margin-top: 32px;
+  font-size: 12px;
+}
+
+.workflow-example .term-comment {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.workflow-right {
+  padding: 80px 60px;
+  position: relative;
+}
+
+.workflow-right::before {
+  content: "06";
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
 }
 
 /* Footer */
 footer {
-  padding: 48px 24px;
-  border-top: 1px solid var(--border);
-  text-align: center;
+  padding: 40px 60px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg);
 }
+
+.footer-left {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+}
+
+.footer-logo {
+  font-family: var(--display);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--white);
+}
+
+.footer-logo span { color: var(--orange); }
 
 .footer-links {
   display: flex;
-  justify-content: center;
-  gap: 32px;
-  margin-bottom: 24px;
+  gap: 24px;
 }
 
-.footer-links a { color: var(--text); font-size: 13px; }
+.footer-links a {
+  font-size: 12px;
+  color: var(--text);
+}
+
 .footer-links a:hover { color: var(--orange); }
 
-.footer-credit {
-  font-size: 12px;
-  color: #444;
+.footer-right {
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 /* Responsive */
-@media (max-width: 768px) {
-  header { padding: 12px 16px; }
-  nav { display: none; }
+@media (max-width: 1200px) {
+  .tools-grid { grid-template-columns: repeat(2, 1fr); }
+}
 
-  .hero { padding: 100px 20px 60px; min-height: auto; }
-  .hero h1 { letter-spacing: -2px; }
+@media (max-width: 900px) {
+  .hero { grid-template-columns: 1fr; }
+  .hero-left { border-right: none; border-bottom: 1px solid var(--border); }
+  .hero-right { min-height: 500px; }
 
-  .demo-layout { grid-template-columns: 1fr; grid-template-rows: auto; }
-  .pane.claude { grid-column: 1; grid-row: auto; }
-  .pane { min-height: 100px; }
+  .install-section,
+  .features-section,
+  .workflow-section { grid-template-columns: 1fr; }
 
-  .install { padding: 80px 20px; }
-  .step { grid-template-columns: 40px 1fr; gap: 16px; }
-  .step-num { width: 40px; height: 40px; font-size: 16px; }
-  .code-block { flex-direction: column; align-items: stretch; gap: 12px; }
-  .code-block code { font-size: 11px; }
+  .install-left,
+  .features-left,
+  .workflow-left { border-right: none; border-bottom: 1px solid var(--border); padding: 40px; }
 
-  .feature-grid { grid-template-columns: 1fr; gap: 16px; }
-  .feature { padding: 24px 20px; }
+  .features-right { grid-template-columns: 1fr; }
+  .feature-card { border-right: none !important; }
 
-  .tool-grid { grid-template-columns: 1fr; }
+  .tools-grid { grid-template-columns: 1fr; }
 
-  .scroll-hint { display: none; }
+  .header-status { display: none; }
+}
+
+@media (max-width: 600px) {
+  .hero-left { padding: 60px 24px; }
+  .hero-stats { flex-direction: column; gap: 24px; }
+  .terminal-grid { grid-template-columns: 1fr; margin: 50px 12px 12px; }
+  .term-pane.main { grid-row: auto; }
+
+  .install-right,
+  .workflow-left,
+  .workflow-right,
+  .tools-section { padding: 40px 24px; }
+
+  footer { flex-direction: column; gap: 24px; text-align: center; }
+  .footer-left { flex-direction: column; gap: 16px; }
 }
 </style>
 </head>
 <body>
 
-<div class="grid-bg"></div>
-
 <header>
-  <div class="logo">zellij<span>-</span>mcp</div>
-  <nav>
-    <a href="#install">Install</a>
-    <a href="#features">Features</a>
-    <a href="#tools">Tools</a>
-  </nav>
-  <a href="https://github.com/genomewalker/zellij-mcp" class="gh-link">
-    <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+  <a href="#" class="header-tab active">
+    <span class="dot"></span>
+    zellij-mcp
+  </a>
+  <a href="#install" class="header-tab">
+    <span class="dot"></span>
+    install
+  </a>
+  <a href="#features" class="header-tab">
+    <span class="dot"></span>
+    features
+  </a>
+  <a href="#tools" class="header-tab">
+    <span class="dot"></span>
+    tools
+  </a>
+  <div class="header-spacer"></div>
+  <div class="header-status">
+    <div class="status-item">
+      <span class="status-dot green"></span>
+      MCP Active
+    </div>
+    <div class="status-item">
+      <span class="status-dot amber"></span>
+      57 Tools
+    </div>
+  </div>
+  <a href="https://github.com/genomewalker/zellij-mcp" class="gh-btn">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
     GitHub
   </a>
 </header>
 
-<section class="hero">
-  <h1>zellij<span class="dash">-</span>mcp</h1>
-  <p class="tagline"><strong>Claude</strong> controls your terminal. Create panes, run commands, orchestrate workflows.</p>
-
-  <div class="demo" style="position: relative;">
-    <div class="demo-bar">
-      <div class="demo-dot r"></div>
-      <div class="demo-dot y"></div>
-      <div class="demo-dot g"></div>
-      <div class="demo-title">zellij</div>
-    </div>
-    <div class="demo-layout">
-      <div class="pane claude" id="pane-claude">
-        <div class="pane-label">Claude</div>
-        <div id="claude-content">
-          <span class="prompt">you:</span> <span id="user-msg"></span><span class="cursor" id="cursor"></span>
+<main>
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="hero-left">
+      <div class="version-badge">v0.9.1 — Agent Spawning</div>
+      <h1 class="hero-title">zellij<span>-</span>mcp</h1>
+      <p class="hero-sub">Terminal Orchestration for Claude</p>
+      <p class="hero-desc">
+        <strong>57 MCP tools</strong> for autonomous terminal control.
+        Agent isolation keeps your workspace untouched while Claude orchestrates
+        panes, runs commands, monitors output, and manages HPC workflows.
+      </p>
+      <div class="hero-stats">
+        <div class="stat">
+          <span class="stat-value">57</span>
+          <span class="stat-label">MCP Tools</span>
         </div>
-        <div id="claude-response" style="margin-top: 12px; color: #666;"></div>
-        <div id="claude-cmd" style="margin-top: 8px; color: var(--orange); font-size: 11px;"></div>
-      </div>
-      <div class="pane nvim" id="pane-nvim">
-        <div class="pane-label">nvim</div>
-        <div id="nvim-content" style="color: #555;">
-          <span style="color: #444;">~</span><br>
-          <span style="color: #444;">~</span><br>
-          <span style="color: #444;">~ VIM - Vi IMproved</span>
+        <div class="stat">
+          <span class="stat-value">0</span>
+          <span class="stat-label">Focus Stolen</span>
         </div>
-      </div>
-      <div class="pane tests" id="pane-tests">
-        <div class="pane-label">tests</div>
-        <div id="tests-content" style="color: #555;"></div>
-      </div>
-    </div>
-    <button class="replay" onclick="replay()">↻ replay</button>
-  </div>
-
-  <div class="scroll-hint">↓ scroll</div>
-</section>
-
-<section class="install" id="install">
-  <h2>Get Started</h2>
-  <h3>Clone, install, restart.</h3>
-
-  <div class="steps">
-    <div class="step">
-      <div class="step-num">1</div>
-      <div class="step-content">
-        <h4>Clone the repository</h4>
-        <div class="code-block">
-          <code>git clone <span class="url">https://github.com/genomewalker/zellij-mcp</span></code>
-          <button class="copy" onclick="copyCmd(this, 'git clone https://github.com/genomewalker/zellij-mcp')">copy</button>
+        <div class="stat">
+          <span class="stat-value">∞</span>
+          <span class="stat-label">Panes Managed</span>
         </div>
       </div>
     </div>
 
-    <div class="step">
-      <div class="step-num">2</div>
-      <div class="step-content">
-        <h4>Run the installer</h4>
-        <div class="code-block">
-          <code>cd zellij-mcp && <span class="url">./scripts/install.sh</span></code>
-          <button class="copy" onclick="copyCmd(this, 'cd zellij-mcp && ./scripts/install.sh')">copy</button>
+    <div class="hero-right">
+      <div class="terminal-grid">
+        <div class="term-pane main" id="pane-main">
+          <div class="pane-header">
+            <span class="pane-title">Claude Code</span>
+            <span class="pane-indicator active"></span>
+          </div>
+          <div id="demo-content">
+            <div class="term-line"><span class="term-prompt">you:</span> <span class="term-cmd" id="user-input"></span><span class="term-cursor" id="cursor"></span></div>
+            <div class="term-line" id="response-line" style="display:none;"><span class="term-output" id="response"></span></div>
+            <div class="term-line" id="tool-line" style="display:none;"><span class="term-dim">→</span> <span class="term-info" id="tool-call"></span></div>
+          </div>
+          <div class="session-map" id="session-map" style="display:none;">
+            <div class="session-map-header">
+              <span class="dot"></span>
+              <span>zellij-agent</span>
+              <span style="margin-left: auto; color: var(--orange);">Tab: agents</span>
+            </div>
+            <div class="session-map-grid">
+              <div class="map-pane active">
+                <span class="name">ipython</span>
+                <span class="status">active</span>
+              </div>
+              <div class="map-pane">
+                <span class="name">ssh:hpc</span>
+                <span class="status">idle</span>
+              </div>
+              <div class="map-pane">
+                <span class="name">worker1</span>
+                <span class="status">idle</span>
+              </div>
+              <div class="map-pane">
+                <span class="name">worker2</span>
+                <span class="status">idle</span>
+              </div>
+            </div>
+          </div>
         </div>
-        <p class="step-note">Installs Python dependencies and registers the MCP server.</p>
+
+        <div class="term-pane" id="pane-ipython">
+          <div class="pane-header">
+            <span class="pane-title" id="ipython-title">ipython</span>
+            <span class="pane-indicator" id="ipython-indicator"></span>
+          </div>
+          <div id="ipython-content">
+            <div class="term-line term-dim" id="ipython-status">waiting...</div>
+          </div>
+        </div>
+
+        <div class="term-pane" id="pane-ssh">
+          <div class="pane-header">
+            <span class="pane-title" id="ssh-title">ssh</span>
+            <span class="pane-indicator" id="ssh-indicator"></span>
+          </div>
+          <div id="ssh-content">
+            <div class="term-line term-dim" id="ssh-status">disconnected</div>
+          </div>
+        </div>
       </div>
     </div>
+  </section>
 
-    <div class="step">
-      <div class="step-num">3</div>
-      <div class="step-content">
-        <h4>Restart Claude Code</h4>
-        <p>Then start talking: "open a floating pane", "create a new tab"</p>
+  <!-- Install Section -->
+  <section class="install-section" id="install">
+    <div class="install-left">
+      <span class="section-label">Get Started</span>
+      <h2 class="section-title">Three commands.<br>Full control.</h2>
+    </div>
+    <div class="install-right">
+      <div class="install-step">
+        <div class="step-num">01</div>
+        <div class="step-content">
+          <h4>Clone the repository</h4>
+          <div class="code-block">
+            <code>git clone https://github.com/genomewalker/zellij-mcp</code>
+            <button class="copy-btn" onclick="copyText(this, 'git clone https://github.com/genomewalker/zellij-mcp')">copy</button>
+          </div>
+        </div>
+      </div>
+      <div class="install-step">
+        <div class="step-num">02</div>
+        <div class="step-content">
+          <h4>Run the installer</h4>
+          <div class="code-block">
+            <code>cd zellij-mcp && ./scripts/install.sh</code>
+            <button class="copy-btn" onclick="copyText(this, 'cd zellij-mcp && ./scripts/install.sh')">copy</button>
+          </div>
+        </div>
+      </div>
+      <div class="install-step">
+        <div class="step-num">03</div>
+        <div class="step-content">
+          <h4>Restart Claude Code</h4>
+          <div class="code-block">
+            <code>Then: "create a pane for my tests"</code>
+            <button class="copy-btn" style="visibility: hidden;">copy</button>
+          </div>
+        </div>
       </div>
     </div>
-  </div>
-</section>
+  </section>
 
-<section class="features" id="features">
-  <div class="features-inner">
-    <h2>Why zellij-mcp</h2>
-    <p class="section-subtitle">Turn natural language into terminal orchestration. 35+ tools for complete control.</p>
-
-    <div class="feature-grid">
-      <div class="feature">
-        <div class="feature-icon">🪟</div>
-        <h3>Pane Control</h3>
-        <p>Create, close, resize, focus panes. Split horizontally or vertically. Toggle floating windows.</p>
+  <!-- Features Section -->
+  <section class="features-section" id="features">
+    <div class="features-left">
+      <span class="section-label">Capabilities</span>
+      <h2 class="section-title">Agent-grade terminal control</h2>
+    </div>
+    <div class="features-right">
+      <div class="feature-card">
+        <div class="feature-icon">⬡</div>
+        <h3>Agent Session Isolation</h3>
+        <p>Autonomous operations run in a separate zellij-agent session. Your workspace stays untouched—no focus stealing, no visual interruption.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon">📑</div>
-        <h3>Tab Management</h3>
-        <p>Create named tabs, switch between them, rename, close. Organize your workspace with voice.</p>
+      <div class="feature-card">
+        <div class="feature-icon">◫</div>
+        <h3>Named Pane Targeting</h3>
+        <p>Address any pane by name, not just the focused one. Create "worker", target "worker", read "worker"—across tabs and sessions.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon">⌨️</div>
-        <h3>Command Execution</h3>
-        <p>Send text, run commands, capture output. Claude types and presses Enter for you.</p>
+      <div class="feature-card">
+        <div class="feature-icon">⏱</div>
+        <h3>Output Monitoring</h3>
+        <p>wait_for_output, wait_for_idle, tail_pane. Watch for patterns, detect completion, stream incremental output.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon">🌐</div>
-        <h3>Cross-Session</h3>
-        <p>Control any Zellij session from anywhere. List sessions, target by name.</p>
+      <div class="feature-card">
+        <div class="feature-icon">⌘</div>
+        <h3>REPL Interaction</h3>
+        <p>Execute code in IPython, R, Julia. Auto-detect REPL type, send code blocks, capture output with prompt detection.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon">📸</div>
-        <h3>Screen Capture</h3>
-        <p>Dump pane content to files. Capture output, logs, test results for analysis.</p>
+      <div class="feature-card">
+        <div class="feature-icon">☁</div>
+        <h3>SSH & HPC Workflows</h3>
+        <p>ssh_connect to remote hosts, ssh_run commands, job_submit to SLURM/PBS clusters, job_status tracking.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon">🔗</div>
-        <h3>Pairs with prism.nvim</h3>
-        <p>Open nvim via zellij-mcp, edit with prism-nvim, run tests in another pane. Full workflow.</p>
+      <div class="feature-card">
+        <div class="feature-icon">⬢</div>
+        <h3>Agent Spawning</h3>
+        <p>spawn_agents to launch multiple Claude instances on parallel tasks. Track status, read output, coordinate work.</p>
       </div>
     </div>
-  </div>
-</section>
+  </section>
 
-<section class="tools" id="tools">
-  <h2>Tools Reference</h2>
-  <div class="tool-grid">
-    <div class="tool-item"><span class="tool-name">new_pane</span><span class="tool-desc">Create pane (floating, direction, command)</span></div>
-    <div class="tool-item"><span class="tool-name">close_pane</span><span class="tool-desc">Close the focused pane</span></div>
-    <div class="tool-item"><span class="tool-name">focus_pane</span><span class="tool-desc">Move focus (up/down/left/right)</span></div>
-    <div class="tool-item"><span class="tool-name">toggle_floating</span><span class="tool-desc">Toggle floating panes</span></div>
-    <div class="tool-item"><span class="tool-name">new_tab</span><span class="tool-desc">Create a new tab</span></div>
-    <div class="tool-item"><span class="tool-name">focus_tab</span><span class="tool-desc">Switch to tab by name/index</span></div>
-    <div class="tool-item"><span class="tool-name">write_chars</span><span class="tool-desc">Send text to pane</span></div>
-    <div class="tool-item"><span class="tool-name">run_command</span><span class="tool-desc">Execute command + Enter</span></div>
-    <div class="tool-item"><span class="tool-name">dump_screen</span><span class="tool-desc">Capture pane to file</span></div>
-    <div class="tool-item"><span class="tool-name">session_info</span><span class="tool-desc">Get current session details</span></div>
-    <div class="tool-item"><span class="tool-name">list_sessions</span><span class="tool-desc">List all Zellij sessions</span></div>
-    <div class="tool-item"><span class="tool-name">dump_layout</span><span class="tool-desc">Export current layout</span></div>
-  </div>
-</section>
+  <!-- Tools Section -->
+  <section class="tools-section" id="tools">
+    <div class="tools-header">
+      <div>
+        <span class="section-label">Reference</span>
+        <h2 class="section-title">57 Tools</h2>
+      </div>
+    </div>
+    <div class="tools-grid">
+      <div class="tool-category">
+        <h4>Pane Management</h4>
+        <div class="tool-list">
+          <div class="tool-item"><code>new_pane</code> Create pane</div>
+          <div class="tool-item"><code>close_pane</code> Close focused</div>
+          <div class="tool-item"><code>focus_pane</code> Move focus</div>
+          <div class="tool-item"><code>resize_pane</code> Resize</div>
+          <div class="tool-item"><code>rename_pane</code> Set name</div>
+          <div class="tool-item"><code>toggle_floating</code> Float mode</div>
+          <div class="tool-item"><code>toggle_fullscreen</code> Max/restore</div>
+        </div>
+      </div>
+      <div class="tool-category">
+        <h4>Named Panes</h4>
+        <div class="tool-list">
+          <div class="tool-item"><code>create_named_pane</code> Create by name</div>
+          <div class="tool-item"><code>destroy_named_pane</code> Close by name</div>
+          <div class="tool-item"><code>list_named_panes</code> Show all</div>
+          <div class="tool-item"><code>focus_pane_by_name</code> Target</div>
+          <div class="tool-item"><code>read_pane</code> Get content</div>
+          <div class="tool-item"><code>write_to_pane</code> Send text</div>
+          <div class="tool-item"><code>run_in_pane</code> Execute cmd</div>
+        </div>
+      </div>
+      <div class="tool-category">
+        <h4>Monitoring</h4>
+        <div class="tool-list">
+          <div class="tool-item"><code>wait_for_output</code> Pattern wait</div>
+          <div class="tool-item"><code>wait_for_idle</code> Stable detect</div>
+          <div class="tool-item"><code>tail_pane</code> New output</div>
+          <div class="tool-item"><code>search_pane</code> Regex search</div>
+          <div class="tool-item"><code>send_keys</code> Special keys</div>
+          <div class="tool-item"><code>clear_pane</code> Clear buffer</div>
+        </div>
+      </div>
+      <div class="tool-category">
+        <h4>SSH & HPC</h4>
+        <div class="tool-list">
+          <div class="tool-item"><code>ssh_connect</code> Open session</div>
+          <div class="tool-item"><code>ssh_run</code> Remote cmd</div>
+          <div class="tool-item"><code>job_submit</code> SLURM/PBS</div>
+          <div class="tool-item"><code>job_status</code> Check jobs</div>
+          <div class="tool-item"><code>repl_execute</code> Run code</div>
+          <div class="tool-item"><code>repl_interrupt</code> Ctrl+C</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Workflow Section -->
+  <section class="workflow-section">
+    <div class="workflow-left">
+      <span class="section-label">Workflow</span>
+      <h2 class="section-title">Agent Isolation</h2>
+      <p style="color: var(--text); margin-top: 16px; line-height: 1.8;">
+        By default, all autonomous operations run in a separate <code style="color: var(--orange);">zellij-agent</code> session.
+        Claude creates panes, runs commands, monitors output—completely invisible to your active workspace.
+      </p>
+      <div class="workflow-example">
+        <div class="term-line term-comment"># Your session stays untouched</div>
+        <div class="term-line"><span class="term-prompt">$</span> <span class="term-cmd">zellij list-sessions</span></div>
+        <div class="term-line term-output">main (current)</div>
+        <div class="term-line term-success">zellij-agent</div>
+        <div class="term-line">&nbsp;</div>
+        <div class="term-line term-comment"># Claude works in isolation</div>
+        <div class="term-line"><span class="term-info">create_named_pane</span> <span class="term-dim">name="worker" command="python3"</span></div>
+        <div class="term-line"><span class="term-success">→ Created in zellij-agent</span></div>
+      </div>
+    </div>
+    <div class="workflow-right">
+      <span class="section-label">Integration</span>
+      <h2 class="section-title">Pairs with prism.nvim</h2>
+      <p style="color: var(--text); margin-top: 16px; line-height: 1.8;">
+        The complete development workflow: zellij-mcp manages panes, prism.nvim handles editor integration.
+        Open nvim in a pane, edit visibly, run tests in another pane.
+      </p>
+      <div class="workflow-example">
+        <div class="term-line term-comment"># Full workflow</div>
+        <div class="term-line"><span class="term-info">1.</span> <span class="term-dim">zellij-mcp:</span> <span class="term-cmd">"open nvim in a floating pane"</span></div>
+        <div class="term-line"><span class="term-info">2.</span> <span class="term-dim">prism.nvim:</span> <span class="term-cmd">"go to line 42, add error handling"</span></div>
+        <div class="term-line"><span class="term-info">3.</span> <span class="term-dim">zellij-mcp:</span> <span class="term-cmd">"run tests in a pane below"</span></div>
+        <div class="term-line"><span class="term-info">4.</span> <span class="term-dim">zellij-mcp:</span> <span class="term-cmd">"capture the test output"</span></div>
+      </div>
+    </div>
+  </section>
+</main>
 
 <footer>
-  <div class="footer-links">
-    <a href="https://github.com/genomewalker/zellij-mcp">GitHub</a>
-    <a href="https://github.com/genomewalker/zellij-mcp/issues">Issues</a>
-    <a href="https://github.com/genomewalker/zellij-mcp#readme">Docs</a>
+  <div class="footer-left">
+    <div class="footer-logo">zellij<span>-</span>mcp</div>
+    <div class="footer-links">
+      <a href="https://github.com/genomewalker/zellij-mcp">GitHub</a>
+      <a href="https://github.com/genomewalker/zellij-mcp/issues">Issues</a>
+      <a href="https://github.com/genomewalker/zellij-mcp#readme">Docs</a>
+      <a href="https://zellij.dev">Zellij</a>
+    </div>
   </div>
-  <div class="footer-credit">zellij-mcp — Claude meets Zellij</div>
+  <div class="footer-right">
+    MIT License · Claude Code MCP Server
+  </div>
 </footer>
 
 <script>
-function copyCmd(btn, text) {
+function copyText(btn, text) {
   navigator.clipboard.writeText(text);
   btn.textContent = 'copied';
-  btn.classList.add('done');
-  setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('done'); }, 2000);
+  setTimeout(() => btn.textContent = 'copy', 2000);
 }
 
-// Demo animation
-const scenario = [
-  { type: 'user', text: 'open nvim in a pane on the right' },
-  { type: 'response', text: 'Creating pane...' },
-  { type: 'cmd', text: 'new_pane --direction right --command "nvim"' },
-  { type: 'pane', id: 'pane-nvim', action: 'highlight' },
-  { type: 'wait', ms: 1000 },
-  { type: 'user', text: 'create a test pane below it' },
-  { type: 'response', text: 'On it.' },
-  { type: 'cmd', text: 'new_pane --direction down' },
-  { type: 'pane', id: 'pane-tests', action: 'highlight' },
-  { type: 'wait', ms: 1000 },
-  { type: 'user', text: 'run npm test there' },
-  { type: 'response', text: 'Running tests...' },
-  { type: 'cmd', text: 'write_chars "npm test" + Enter' },
-  { type: 'tests', text: '$ npm test\n\n PASS  src/app.test.ts\n ✓ renders correctly (23 ms)\n ✓ handles click (12 ms)' },
+// Demo Animation - Enhanced with side pane activity
+const demo = [
+  // Step 1: Create IPython pane
+  { action: 'type', text: 'create an ipython pane', delay: 35 },
+  { action: 'wait', ms: 300 },
+  { action: 'response', text: 'Creating IPython pane in agent session...' },
+  { action: 'tool', text: 'create_named_pane name="ipython" command="ipython3"' },
+  { action: 'wait', ms: 200 },
+  { action: 'activatePane', pane: 'ipython' },
+  { action: 'ipythonBoot' },
+  { action: 'wait', ms: 1200 },
+  { action: 'deactivatePane', pane: 'ipython' },
+  { action: 'clear' },
+
+  // Step 2: Connect SSH
+  { action: 'type', text: 'connect to hpc cluster', delay: 35 },
+  { action: 'wait', ms: 300 },
+  { action: 'response', text: 'Opening SSH connection...' },
+  { action: 'tool', text: 'ssh_connect name="hpc" host="user@cluster.edu"' },
+  { action: 'wait', ms: 200 },
+  { action: 'activatePane', pane: 'ssh' },
+  { action: 'sshConnect' },
+  { action: 'wait', ms: 1500 },
+  { action: 'deactivatePane', pane: 'ssh' },
+  { action: 'clear' },
+
+  // Step 3: Run code in IPython
+  { action: 'type', text: 'analyze the data in ipython', delay: 35 },
+  { action: 'wait', ms: 300 },
+  { action: 'response', text: 'Executing code...' },
+  { action: 'tool', text: 'repl_execute pane="ipython" code="df.describe()"' },
+  { action: 'wait', ms: 200 },
+  { action: 'activatePane', pane: 'ipython' },
+  { action: 'ipythonRun' },
+  { action: 'wait', ms: 1500 },
+  { action: 'deactivatePane', pane: 'ipython' },
+  { action: 'clear' },
+
+  // Step 4: Check jobs on HPC
+  { action: 'type', text: 'check my jobs on the cluster', delay: 35 },
+  { action: 'wait', ms: 300 },
+  { action: 'response', text: 'Querying job status...' },
+  { action: 'tool', text: 'ssh_run name="hpc" command="squeue -u $USER"' },
+  { action: 'wait', ms: 200 },
+  { action: 'activatePane', pane: 'ssh' },
+  { action: 'sshJobs' },
+  { action: 'wait', ms: 1500 },
+  { action: 'deactivatePane', pane: 'ssh' },
+  { action: 'clear' },
+
+  // Step 5: Show session map
+  { action: 'type', text: 'show me the session map', delay: 35 },
+  { action: 'wait', ms: 300 },
+  { action: 'response', text: 'Current layout:' },
+  { action: 'tool', text: 'session_map' },
+  { action: 'map', show: true },
+  { action: 'wait', ms: 2500 },
+
+  { action: 'restart' }
 ];
 
-let timeouts = [];
+let demoIndex = 0;
+let charIndex = 0;
 
-function clearAllTimeouts() {
-  timeouts.forEach(t => clearTimeout(t));
-  timeouts = [];
-}
+function runDemo() {
+  if (demoIndex >= demo.length) {
+    demoIndex = 0;
+    charIndex = 0;
+  }
 
-function wait(ms) {
-  return new Promise(r => {
-    const t = setTimeout(r, ms);
-    timeouts.push(t);
-  });
-}
+  const step = demo[demoIndex];
 
-function typeText(el, text, speed) {
-  return new Promise(resolve => {
-    let i = 0;
-    function t() {
-      if (i < text.length) {
-        el.textContent += text[i++];
-        const tid = setTimeout(t, speed);
-        timeouts.push(tid);
+  switch (step.action) {
+    case 'type':
+      const input = document.getElementById('user-input');
+      if (charIndex < step.text.length) {
+        input.textContent += step.text[charIndex];
+        charIndex++;
+        setTimeout(runDemo, step.delay);
       } else {
-        resolve();
+        charIndex = 0;
+        demoIndex++;
+        document.getElementById('cursor').style.display = 'none';
+        setTimeout(runDemo, 150);
       }
-    }
-    t();
-  });
-}
+      break;
 
-async function runDemo() {
-  clearAllTimeouts();
+    case 'wait':
+      demoIndex++;
+      setTimeout(runDemo, step.ms);
+      break;
 
-  // Reset
-  document.getElementById('user-msg').textContent = '';
-  document.getElementById('claude-response').textContent = '';
-  document.getElementById('claude-cmd').textContent = '';
-  document.getElementById('cursor').style.display = 'inline-block';
-  document.getElementById('tests-content').textContent = '';
-  document.querySelectorAll('.pane').forEach(p => p.classList.remove('highlight'));
+    case 'response':
+      document.getElementById('response-line').style.display = 'block';
+      document.getElementById('response').textContent = step.text;
+      demoIndex++;
+      setTimeout(runDemo, 150);
+      break;
 
-  await wait(500);
+    case 'tool':
+      document.getElementById('tool-line').style.display = 'block';
+      document.getElementById('tool-call').textContent = step.text;
+      demoIndex++;
+      setTimeout(runDemo, 200);
+      break;
 
-  for (const step of scenario) {
-    if (step.type === 'user') {
-      document.getElementById('user-msg').textContent = '';
-      document.getElementById('claude-response').textContent = '';
-      document.getElementById('claude-cmd').textContent = '';
+    case 'activatePane':
+      const paneEl = document.getElementById('pane-' + step.pane);
+      const indicator = document.getElementById(step.pane + '-indicator');
+      paneEl.classList.add('active-pane');
+      indicator.classList.add('active');
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'deactivatePane':
+      document.getElementById('pane-' + step.pane).classList.remove('active-pane');
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'ipythonBoot':
+      const ipyContent = document.getElementById('ipython-content');
+      ipyContent.innerHTML = `
+        <div class="term-line" style="color:var(--text-dim)">Python 3.11.0</div>
+        <div class="term-line" style="color:var(--text-dim)">IPython 8.12.0</div>
+        <div class="term-line">&nbsp;</div>
+        <div class="term-line"><span class="term-info">In [1]:</span> <span class="term-cursor"></span></div>
+      `;
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'ipythonRun':
+      const ipyContent2 = document.getElementById('ipython-content');
+      ipyContent2.innerHTML = `
+        <div class="term-line"><span class="term-info">In [2]:</span> <span class="term-cmd">df.describe()</span></div>
+        <div class="term-line" style="color:var(--text-dim)">Out[2]:</div>
+        <div class="term-line" style="color:var(--orange)">       count   mean    std</div>
+        <div class="term-line" style="color:var(--orange)">col_a  1000   45.2   12.3</div>
+        <div class="term-line" style="color:var(--orange)">col_b  1000   78.9   23.1</div>
+        <div class="term-line">&nbsp;</div>
+        <div class="term-line"><span class="term-info">In [3]:</span> <span class="term-cursor"></span></div>
+      `;
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'sshConnect':
+      const sshTitle = document.getElementById('ssh-title');
+      const sshContent = document.getElementById('ssh-content');
+      sshTitle.textContent = 'ssh:hpc';
+      sshContent.innerHTML = `
+        <div class="term-line" style="color:var(--green)">Connecting to cluster.edu...</div>
+        <div class="term-line" style="color:var(--orange)">Authentication successful</div>
+        <div class="term-line">&nbsp;</div>
+        <div class="term-line"><span class="term-prompt">user@hpc:~$</span> <span class="term-cursor"></span></div>
+      `;
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'sshJobs':
+      const sshContent2 = document.getElementById('ssh-content');
+      sshContent2.innerHTML = `
+        <div class="term-line"><span class="term-prompt">user@hpc:~$</span> <span class="term-cmd">squeue -u $USER</span></div>
+        <div class="term-line" style="color:var(--text-dim)">JOBID   NAME      STATE    TIME</div>
+        <div class="term-line" style="color:var(--orange)">84521   analysis  RUNNING  2:34:12</div>
+        <div class="term-line" style="color:var(--green)">84522   preproc   PENDING  0:00:00</div>
+        <div class="term-line">&nbsp;</div>
+        <div class="term-line"><span class="term-prompt">user@hpc:~$</span> <span class="term-cursor"></span></div>
+      `;
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'map':
+      document.getElementById('session-map').style.display = 'block';
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'clear':
+      document.getElementById('user-input').textContent = '';
+      document.getElementById('response-line').style.display = 'none';
+      document.getElementById('tool-line').style.display = 'none';
+      document.getElementById('session-map').style.display = 'none';
       document.getElementById('cursor').style.display = 'inline-block';
-      await typeText(document.getElementById('user-msg'), step.text, 25);
-      document.getElementById('cursor').style.display = 'none';
-      await wait(300);
-    } else if (step.type === 'response') {
-      document.getElementById('claude-response').textContent = step.text;
-      await wait(200);
-    } else if (step.type === 'cmd') {
-      document.getElementById('claude-cmd').textContent = '→ ' + step.text;
-      await wait(400);
-    } else if (step.type === 'pane') {
-      document.getElementById(step.id).classList.add('highlight');
-      await wait(500);
-    } else if (step.type === 'tests') {
-      document.getElementById('tests-content').innerHTML = step.text.replace(/\n/g, '<br>').replace(/PASS/g, '<span style="color: var(--green)">PASS</span>').replace(/✓/g, '<span style="color: var(--green)">✓</span>');
-      await wait(500);
-    } else if (step.type === 'wait') {
-      await wait(step.ms);
-    }
+      demoIndex++;
+      setTimeout(runDemo, 400);
+      break;
+
+    case 'restart':
+      // Reset everything
+      document.getElementById('user-input').textContent = '';
+      document.getElementById('response-line').style.display = 'none';
+      document.getElementById('tool-line').style.display = 'none';
+      document.getElementById('session-map').style.display = 'none';
+      document.getElementById('cursor').style.display = 'inline-block';
+      document.querySelectorAll('.pane-indicator').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.term-pane').forEach(el => el.classList.remove('active-pane'));
+
+      // Reset pane contents
+      document.getElementById('ipython-content').innerHTML = '<div class="term-line term-dim">waiting...</div>';
+      document.getElementById('ssh-content').innerHTML = '<div class="term-line term-dim">disconnected</div>';
+      document.getElementById('ssh-title').textContent = 'ssh';
+
+      demoIndex = 0;
+      setTimeout(runDemo, 2000);
+      break;
   }
 }
 
-function replay() {
-  runDemo();
-}
+// Tab highlighting
+document.querySelectorAll('.header-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.header-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+  });
+});
 
+// Start demo
 window.addEventListener('load', () => {
   setTimeout(runDemo, 800);
 });

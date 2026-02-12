@@ -104,6 +104,106 @@ def get_agent_session() -> str:
 
 
 # =============================================================================
+# PANE BRIDGE PLUGIN - Focus-free pane operations
+# =============================================================================
+
+def get_plugin_path() -> Optional[str]:
+    """Get the path to the pane-bridge WASM plugin if installed."""
+    paths = [
+        os.path.expanduser("~/.local/share/zellij-mcp/plugins/zellij-pane-bridge.wasm"),
+        os.path.join(os.path.dirname(__file__), "zellij-pane-bridge.wasm"),
+    ]
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+_plugin_path_cache: Optional[str] = None
+_plugin_available: Optional[bool] = None
+
+
+def is_plugin_available() -> bool:
+    """Check if the pane-bridge plugin is available."""
+    global _plugin_path_cache, _plugin_available
+    if _plugin_available is None:
+        _plugin_path_cache = get_plugin_path()
+        _plugin_available = _plugin_path_cache is not None
+    return _plugin_available
+
+
+def plugin_command(cmd: str, payload: dict = None, timeout: float = 5.0) -> dict:
+    """Execute a command via the pane-bridge plugin.
+
+    Returns dict with success/error/data fields.
+    """
+    if not is_plugin_available():
+        return {"success": False, "error": "pane-bridge plugin not installed"}
+
+    plugin_url = f"file://{_plugin_path_cache}"
+    payload_json = json.dumps(payload) if payload else "{}"
+
+    try:
+        result = subprocess.run(
+            ["zellij", "pipe", "-p", plugin_url, "-n", cmd, "--", payload_json],
+            capture_output=True, text=True, timeout=timeout
+        )
+
+        # Try to parse response JSON
+        stdout = result.stdout.strip()
+        if stdout:
+            try:
+                return json.loads(stdout)
+            except json.JSONDecodeError:
+                return {"success": True, "raw": stdout}
+
+        # No output but command ran - assume success for fire-and-forget commands
+        if result.returncode == 0:
+            return {"success": True}
+
+        return {"success": False, "error": result.stderr or "Plugin command failed"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": f"Plugin command timed out after {timeout}s"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def plugin_write_to_pane(pane_id: int, chars: str) -> dict:
+    """Write characters to a pane by ID without focus stealing."""
+    return plugin_command("write", {"pane_id": pane_id, "chars": chars})
+
+
+def plugin_list_panes() -> dict:
+    """Get list of all panes via plugin."""
+    return plugin_command("list")
+
+
+def plugin_get_protected() -> dict:
+    """Get the protected (Claude) pane ID."""
+    return plugin_command("get_protected")
+
+
+def plugin_find_pane_id(name: str) -> Optional[int]:
+    """Find a pane ID by name/title/command using the plugin.
+
+    Returns the pane ID if found, None otherwise.
+    """
+    result = plugin_list_panes()
+    if not result.get("success") or not result.get("data"):
+        return None
+
+    name_lower = name.lower()
+    for pane in result.get("data", []):
+        title = pane.get("title", "").lower()
+        command = (pane.get("command") or "").lower()
+
+        if name_lower in title or name_lower in command:
+            return pane.get("id")
+
+    return None
+
+
+# =============================================================================
 # UTILITIES
 # =============================================================================
 
@@ -402,6 +502,40 @@ def parse_layout_panes(layout_text: str) -> list[dict]:
                 # Parse the args string - format: "arg1" "arg2" "arg3"
                 args_str = args_match.group(1)
                 current_pane["args"] = args_str
+
+            # Check for nested pane declarations (e.g., inside split_direction blocks)
+            # These are real panes that need to be captured
+            nested_pane_match = re.match(r'\s*pane\b', stripped)
+            if nested_pane_match and 'borderless=true' not in stripped:
+                # This is a nested pane - create a new pane_info for it
+                nested_info = {
+                    "tab": current_tab,
+                    "tab_index": current_tab_index,
+                    "tab_focused": tab_focused,
+                    "pane_index": pane_index_in_tab,
+                    "floating": in_floating,
+                }
+                pane_index_in_tab += 1
+
+                # Extract command from nested pane
+                cmd_match = re.search(r'command="([^"]+)"', stripped)
+                if cmd_match:
+                    nested_info["command"] = cmd_match.group(1)
+
+                # Extract name from nested pane
+                name_match = re.search(r'name="([^"]+)"', stripped)
+                if name_match:
+                    nested_info["name"] = name_match.group(1)
+
+                # Extract size
+                size_match = re.search(r'size="([^"]+)"', stripped)
+                if size_match:
+                    nested_info["size"] = size_match.group(1)
+
+                # Check if focused
+                nested_info["focused"] = "focus=true" in stripped and tab_focused
+
+                panes.append(nested_info)
 
             # Check if pane block ended
             if pane_brace_depth <= 0:
@@ -1590,10 +1724,31 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if arguments.get("press_enter"):
             chars += "\n"
 
-        async def do_write():
-            return zellij_action("write-chars", chars, session=session)
-
-        result = await with_pane_focus(pane_name, do_write, session=session)
+        # Try plugin first (no focus stealing)
+        if is_plugin_available():
+            pane_id = plugin_find_pane_id(pane_name)
+            if pane_id is not None:
+                result = plugin_write_to_pane(pane_id, chars)
+                if result.get("success"):
+                    result["method"] = "plugin"
+                else:
+                    # Plugin failed, fall back to focus method
+                    async def do_write():
+                        return zellij_action("write-chars", chars, session=session)
+                    result = await with_pane_focus(pane_name, do_write, session=session)
+                    result["method"] = "focus_fallback"
+            else:
+                # Pane not found via plugin, try focus method
+                async def do_write():
+                    return zellij_action("write-chars", chars, session=session)
+                result = await with_pane_focus(pane_name, do_write, session=session)
+                result["method"] = "focus"
+        else:
+            # Plugin not available, use focus method
+            async def do_write():
+                return zellij_action("write-chars", chars, session=session)
+            result = await with_pane_focus(pane_name, do_write, session=session)
+            result["method"] = "focus"
 
     elif name == "send_keys":
         # Panes are in current session (tab-based workspaces)
@@ -1613,7 +1768,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return zellij_action("write", *byte_args, session=session)
 
             if pane_name:
-                result = await with_pane_focus(pane_name, do_send, session=session)
+                # Try plugin first (no focus stealing)
+                if is_plugin_available():
+                    pane_id = plugin_find_pane_id(pane_name)
+                    if pane_id is not None:
+                        result = plugin_command("write_bytes", {"pane_id": pane_id, "bytes": byte_seq})
+                        if result.get("success"):
+                            result["method"] = "plugin"
+                        else:
+                            result = await with_pane_focus(pane_name, do_send, session=session)
+                            result["method"] = "focus_fallback"
+                    else:
+                        result = await with_pane_focus(pane_name, do_send, session=session)
+                        result["method"] = "focus"
+                else:
+                    result = await with_pane_focus(pane_name, do_send, session=session)
+                    result["method"] = "focus"
             else:
                 result = await do_send()
 
@@ -1885,20 +2055,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     direction = calculate_grid_direction(len(panes))
 
             # Count panes before creation (to determine new pane's index)
+            # Use the target tab name (we know what tab we're creating in)
+            target_tab_name = tab if tab else None
             pre_layout = zellij_action("dump-layout", capture=True, session=session)
             pre_pane_count = 0
-            current_tab_name = None
             if pre_layout.get("success"):
                 pre_panes = parse_layout_panes(pre_layout.get("stdout", ""))
-                # Get focused tab name or first tab
-                for p in pre_panes:
-                    if p.get("tab_focused") or (current_tab_name is None and p.get("tab")):
-                        current_tab_name = p.get("tab")
+                # If no explicit tab, find the focused tab
+                if not target_tab_name:
+                    for p in pre_panes:
                         if p.get("tab_focused"):
+                            target_tab_name = p.get("tab")
                             break
-                # Count panes in current tab (excluding plugins)
+                    if not target_tab_name and pre_panes:
+                        target_tab_name = pre_panes[0].get("tab")
+                # Count panes in TARGET tab (excluding plugins)
                 tab_panes = [p for p in pre_panes
-                             if p.get("tab") == current_tab_name
+                             if p.get("tab") == target_tab_name
                              and not (p.get("command") and "plugin" in str(p.get("command", "")))]
                 pre_pane_count = len(tab_panes)
 
@@ -1918,6 +2091,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 # Wait briefly for pane to initialize
                 time.sleep(0.3)
 
+                # Panes created with a command start suspended in Zellij.
+                # Send Enter to start the command, then wait for shell to initialize.
+                if command:
+                    # Send Enter to unsuspend the pane (starts the command)
+                    zellij_action("write", "13", session=session)  # 13 = Enter key
+                    time.sleep(0.5)  # Wait for command to start
+
                 # Write a unique marker to the pane content for identification
                 # The new pane should be focused after creation
                 marker = f"# ZELLIJ_PANE_ID={pane_name}"
@@ -1932,7 +2112,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 # Register in state with index for later lookup
                 pane_info = state.register_pane(
                     name=pane_name,
-                    tab=tab or current_tab_name or "current",
+                    tab=tab or target_tab_name or "current",
                     command=command,
                     cwd=cwd,
                     pane_index=new_pane_index,

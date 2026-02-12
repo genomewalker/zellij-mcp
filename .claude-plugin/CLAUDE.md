@@ -4,6 +4,8 @@ Autonomous Zellij control for Claude Code. 57 tools for pane management, output 
 
 ## Key Features
 
+- **Focus-free pane control** - Write to any pane without stealing focus (via Zellij plugin)
+- **Claude pane protection** - Auto-detects and protects the agent's pane from accidental closure
 - **Tab-based workspaces** - Agent work is organized into dedicated tabs, switch tabs to observe progress
 - **Pane targeting** - Work with any pane by name, not just focused
 - **Output monitoring** - Wait for patterns, tail new output, search history

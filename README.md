@@ -12,6 +12,10 @@
 
 ## Why zellij-mcp?
 
+**Focus-free pane control.** Native Zellij plugin writes to panes without stealing focus. Your cursor stays where it is while Claude works in the background.
+
+**Claude pane protection.** Auto-detects the agent's pane and prevents accidental closure. No more killing yourself mid-task.
+
 **Tab-based workspaces.** Agent work is organized into dedicated tabs (e.g., "agents", "analysis", "hpc"). Switch tabs to observe agent progress, or stay in your own tab.
 
 **Named pane targeting.** Address any pane by name, not just the focused one. `create_named_pane("worker")`, `read_pane("worker")`, `run_in_pane("worker", "make test")`.
@@ -156,6 +160,18 @@ The complete development workflow:
 3. zellij-mcp: "run tests in a pane below"
 4. zellij-mcp: "wait for tests and show results"
 ```
+
+---
+
+## Pane Bridge Plugin
+
+The installer includes a native Zellij plugin (`zellij-pane-bridge.wasm`) that enables:
+
+- **Focus-free writes** - Send text to any pane without changing focus
+- **Claude pane protection** - Auto-detects and protects the agent's pane from closure
+- **Direct pane control** - Close, hide, show panes by ID
+
+The MCP server automatically uses the plugin when available, falling back to focus-based operations if not installed.
 
 ---
 

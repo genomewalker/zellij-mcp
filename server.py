@@ -1200,8 +1200,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if arguments.get("start_suspended"):
             args.append("--start-suspended")
         if arguments.get("command"):
-            args.append("--")
-            args.append(arguments["command"])
+            command = arguments["command"]
+            # Complex commands (with spaces, pipes, &&, etc.) need shell wrapping
+            if any(c in command for c in [' ', '|', '&', ';', '>', '<', '$', '`']):
+                args.extend(["--", "bash", "-c", command])
+            else:
+                args.extend(["--", command])
         result = zellij_action(*args, session=session)
 
     elif name == "close_pane":
@@ -1719,7 +1723,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             if cwd:
                 args.extend(["--cwd", cwd])
             if command:
-                args.extend(["--", command])
+                # Complex commands (with spaces, pipes, &&, etc.) need shell wrapping
+                if any(c in command for c in [' ', '|', '&', ';', '>', '<', '$', '`']):
+                    args.extend(["--", "bash", "-c", command])
+                else:
+                    args.extend(["--", command])
 
             create_result = zellij_action(*args, session=session)
             if create_result.get("success"):

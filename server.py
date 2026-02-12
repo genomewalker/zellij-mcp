@@ -2268,47 +2268,47 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "tabs": tabs,
                 })
 
-            # Generate ASCII map
+            # Generate ASCII map (using simple ASCII for compatibility)
             lines = []
-            lines.append("╔" + "═" * 78 + "╗")
-            lines.append("║" + "ZELLIJ SESSION MAP".center(78) + "║")
-            lines.append("╠" + "═" * 78 + "╣")
+            lines.append("+" + "=" * 78 + "+")
+            lines.append("|" + "ZELLIJ SESSION MAP".center(78) + "|")
+            lines.append("+" + "=" * 78 + "+")
 
             for sess in session_maps:
-                marker = " (CURRENT)" if sess["current"] else ""
+                marker = " << CURRENT" if sess["current"] else ""
                 agent = " [AGENT]" if sess["name"] == "zellij-agent" else ""
-                lines.append("║" + " " * 78 + "║")
-                lines.append("║  " + f"┌─ {sess['name']}{marker}{agent} ".ljust(75, "─") + "┐ ║")
+                lines.append("|" + " " * 78 + "|")
+                lines.append("|  " + f"+-- {sess['name']}{marker}{agent} ".ljust(75, "-") + "+ |")
                 if sess["cwd"]:
-                    lines.append("║  │  " + f"cwd: {sess['cwd']}".ljust(72) + "│ ║")
+                    lines.append("|  |  " + f"cwd: {sess['cwd']}".ljust(72) + "| |")
 
                 for tab in sess["tabs"]:
-                    focus = "*" if tab["focused"] else ""
-                    lines.append("║  │" + " " * 73 + "│ ║")
-                    lines.append("║  │  " + f"[{tab['name']}]{focus}".ljust(72) + "│ ║")
+                    focus = " *" if tab["focused"] else ""
+                    lines.append("|  |" + " " * 73 + "| |")
+                    lines.append("|  |  " + f"[{tab['name']}]{focus}".ljust(72) + "| |")
 
                     if not compact:
                         # Show panes
                         panes = tab["panes"] if tab["panes"] else ["shell"]
                         for pane in panes[:4]:  # Limit to 4 panes
                             pane_display = pane[:65] + "..." if len(pane) > 68 else pane
-                            lines.append("║  │    " + f"├─ {pane_display}".ljust(70) + "│ ║")
+                            lines.append("|  |    " + f"|-- {pane_display}".ljust(70) + "| |")
 
                         if len(panes) > 4:
-                            lines.append("║  │    " + f"└─ ... and {len(panes) - 4} more".ljust(70) + "│ ║")
+                            lines.append("|  |    " + f"`-- ... and {len(panes) - 4} more".ljust(70) + "| |")
 
                         # Show floating panes
                         if tab["floating"]:
                             float_count = len(tab["floating"])
                             float_info = tab["floating"][0] if float_count == 1 else f"{float_count} floating"
-                            lines.append("║  │    " + f"󰀁 {float_info}".ljust(70) + "│ ║")
+                            lines.append("|  |    " + f"(~) {float_info}".ljust(70) + "| |")
 
-                lines.append("║  " + "└" + "─" * 75 + "┘ ║")
+                lines.append("|  " + "+" + "-" * 75 + "+ |")
 
-            lines.append("║" + " " * 78 + "║")
-            lines.append("╚" + "═" * 78 + "╝")
+            lines.append("|" + " " * 78 + "|")
+            lines.append("+" + "=" * 78 + "+")
             lines.append("")
-            lines.append("Legend: * = focused tab, 󰀁 = floating, [AGENT] = agent session")
+            lines.append("Legend: * = focused tab, (~) = floating, [AGENT] = agent session")
 
             result = {
                 "success": True,

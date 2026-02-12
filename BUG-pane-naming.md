@@ -2,40 +2,39 @@
 
 **Discovered**: 2026-02-12 during shepherd skill testing
 **Severity**: Medium (affects pane targeting workflows)
+**Status**: RESOLVED via architectural change (v0.11.0)
 
 ## Problem
 
 When using `create_named_pane`, the pane is created but the name is not set. The `list_named_panes` tool shows `alive: false` for all created panes because `find_pane_by_name` cannot match them in the layout dump.
 
-## Steps to Reproduce
+## Root Cause
 
-```bash
-# Create a named pane via zellij CLI
-zellij -s cc-soul action new-pane --name "test-pane" --floating
+1. Zellij doesn't support creating panes in detached sessions
+2. `rename-pane` renames the *currently focused* pane, not necessarily the newly created one
+3. Pane names set via CLI don't persist in layout dumps for detached sessions
 
-# Check if name appears in layout
-zellij -s cc-soul action dump-layout | grep "test-pane"
-# Returns nothing - name not set
-```
+## Resolution (v0.11.0)
 
-## Root Cause Analysis
+**Architectural change: Tab-based workspaces instead of session isolation**
 
-The `create_named_pane` function in `server.py`:
-1. Creates a new pane via `new-pane` action
-2. Then runs `rename-pane` action to set the name
-3. BUT `rename-pane` renames the *currently focused* pane
-4. In detached sessions or when focus changes, the wrong pane gets renamed
+- Removed agent session isolation (Zellij limitation: can't create panes in detached sessions)
+- All pane operations now work in the current attached session
+- Agent work organized into dedicated tabs (e.g., "agents", "analysis", "build")
+- Pane targeting uses content markers and registered indices as fallbacks
 
-## Relevant Code
+This resolves the issue because panes are now created in an attached session where:
+1. The `--name` flag works with `new-pane`
+2. `rename-pane` can reliably target the newly created pane
+3. Focus operations work correctly
 
+## Migration
+
+Users relying on session isolation should update their workflows:
 ```python
-# server.py line ~1600
-# The issue is that new-pane doesn't guarantee focus on the new pane
-# before rename-pane is called
+# Old (deprecated): Separate session
+create_named_pane(name="worker")  # Would go to zellij-agent session
+
+# New: Tab-based organization
+create_named_pane(name="worker", tab="work")  # Creates in "work" tab
 ```
-
-## Potential Fix
-
-Option 1: Use `--name` flag directly with `new-pane` (if zellij supports it natively)
-Option 2: Focus the new pane explicitly before renaming
-Option 3: Track pane by command/cwd instead of name for identification

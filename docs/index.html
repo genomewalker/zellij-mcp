@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>zellij-mcp · Terminal Orchestration for Claude</title>
-<meta name="description" content="57 MCP tools for autonomous terminal control. Agent isolation, REPL interaction, SSH/HPC workflows.">
+<meta name="description" content="57 MCP tools for autonomous terminal control. Tab-based workspaces, REPL interaction, SSH/HPC workflows.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -905,12 +905,12 @@ footer {
   <!-- Hero Section -->
   <section class="hero">
     <div class="hero-left">
-      <div class="version-badge">v0.9.1 — Agent Spawning</div>
+      <div class="version-badge">v0.11.0 — Tab Workspaces</div>
       <h1 class="hero-title">zellij<span>-</span>mcp</h1>
       <p class="hero-sub">Terminal Orchestration for Claude</p>
       <p class="hero-desc">
         <strong>57 MCP tools</strong> for autonomous terminal control.
-        Agent isolation keeps your workspace untouched while Claude orchestrates
+        Tab-based workspaces keep agent work organized while Claude orchestrates
         panes, runs commands, monitors output, and manages HPC workflows.
       </p>
       <div class="hero-stats">
@@ -919,8 +919,8 @@ footer {
           <span class="stat-label">MCP Tools</span>
         </div>
         <div class="stat">
-          <span class="stat-value">0</span>
-          <span class="stat-label">Focus Stolen</span>
+          <span class="stat-value">∞</span>
+          <span class="stat-label">Tabs Managed</span>
         </div>
         <div class="stat">
           <span class="stat-value">∞</span>
@@ -944,7 +944,7 @@ footer {
           <div class="session-map" id="session-map" style="display:none;">
             <div class="session-map-header">
               <span class="dot"></span>
-              <span>zellij-agent</span>
+              <span>workspace</span>
               <span style="margin-left: auto; color: var(--orange);">Tab: agents</span>
             </div>
             <div class="session-map-grid">
@@ -1040,8 +1040,8 @@ footer {
     <div class="features-right">
       <div class="feature-card">
         <div class="feature-icon">⬡</div>
-        <h3>Agent Session Isolation</h3>
-        <p>Autonomous operations run in a separate zellij-agent session. Your workspace stays untouched—no focus stealing, no visual interruption.</p>
+        <h3>Tab-Based Workspaces</h3>
+        <p>Agent work is organized into dedicated tabs. Switch to agent tabs to observe progress, or stay in your own tab. Clean organization, easy navigation.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">◫</div>
@@ -1133,20 +1133,19 @@ footer {
   <section class="workflow-section">
     <div class="workflow-left">
       <span class="section-label">Workflow</span>
-      <h2 class="section-title">Agent Isolation</h2>
+      <h2 class="section-title">Tab Workspaces</h2>
       <p style="color: var(--text); margin-top: 16px; line-height: 1.8;">
-        By default, all autonomous operations run in a separate <code style="color: var(--orange);">zellij-agent</code> session.
-        Claude creates panes, runs commands, monitors output—completely invisible to your active workspace.
+        Agent work is organized into dedicated tabs within your session.
+        Claude creates panes in tabs like <code style="color: var(--orange);">agents</code>, <code style="color: var(--orange);">build</code>, or <code style="color: var(--orange);">analysis</code>—switch tabs to observe.
       </p>
       <div class="workflow-example">
-        <div class="term-line term-comment"># Your session stays untouched</div>
-        <div class="term-line"><span class="term-prompt">$</span> <span class="term-cmd">zellij list-sessions</span></div>
-        <div class="term-line term-output">main (current)</div>
-        <div class="term-line term-success">zellij-agent</div>
+        <div class="term-line term-comment"># Create panes in dedicated tabs</div>
+        <div class="term-line"><span class="term-info">create_named_pane</span> <span class="term-dim">name="worker" tab="build"</span></div>
+        <div class="term-line"><span class="term-success">→ Created in "build" tab</span></div>
         <div class="term-line">&nbsp;</div>
-        <div class="term-line term-comment"># Claude works in isolation</div>
-        <div class="term-line"><span class="term-info">create_named_pane</span> <span class="term-dim">name="worker" command="python3"</span></div>
-        <div class="term-line"><span class="term-success">→ Created in zellij-agent</span></div>
+        <div class="term-line term-comment"># Switch tabs to observe progress</div>
+        <div class="term-line"><span class="term-info">focus_tab</span> <span class="term-dim">name="build"</span></div>
+        <div class="term-line"><span class="term-success">→ Switched to build tab</span></div>
       </div>
     </div>
     <div class="workflow-right">
@@ -1194,7 +1193,7 @@ const demo = [
   // Step 1: Create IPython pane
   { action: 'type', text: 'create an ipython pane', delay: 35 },
   { action: 'wait', ms: 300 },
-  { action: 'response', text: 'Creating IPython pane in agent session...' },
+  { action: 'response', text: 'Creating IPython pane in workspace tab...' },
   { action: 'tool', text: 'create_named_pane name="ipython" command="ipython3"' },
   { action: 'wait', ms: 200 },
   { action: 'activatePane', pane: 'ipython' },

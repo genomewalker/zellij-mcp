@@ -1,6 +1,6 @@
 # zellij-mcp
 
-**Terminal orchestration for Claude Code. 57 tools. Zero focus stealing.**
+**Terminal orchestration for Claude Code. 57 tools. Tab-based workspaces.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Zellij](https://img.shields.io/badge/Zellij-0.40+-orange?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDIgN2wxMCA1IDEwLTV6Ii8+PC9zdmc+)](https://zellij.dev)
@@ -12,7 +12,7 @@
 
 ## Why zellij-mcp?
 
-**Agent isolation.** Claude works in a separate `zellij-agent` session. Your workspace stays untouched—no focus stealing, no visual interruption.
+**Tab-based workspaces.** Agent work is organized into dedicated tabs (e.g., "agents", "analysis", "hpc"). Switch tabs to observe agent progress, or stay in your own tab.
 
 **Named pane targeting.** Address any pane by name, not just the focused one. `create_named_pane("worker")`, `read_pane("worker")`, `run_in_pane("worker", "make test")`.
 
@@ -45,13 +45,13 @@ Then **restart Claude Code**.
 
 ## Key Features
 
-### Agent Session Isolation
+### Tab-Based Workspaces
 
-All autonomous operations run in a dedicated `zellij-agent` session:
+Agent operations are organized into dedicated tabs within your session:
 
 ```python
-create_named_pane(name="analysis", command="ipython3")
-# → Created in zellij-agent, your session untouched
+create_named_pane(name="analysis", command="ipython3", tab="work")
+# → Created in "work" tab, switch tabs to observe progress
 ```
 
 ### Named Pane Operations
@@ -126,7 +126,7 @@ agent_output(name="researcher")
 ### Session & Layout (6 tools)
 `list_sessions` `list_panes` `session_info` `dump_layout` `swap_layout` `session_map`
 
-### Agent Management (5 tools)
+### Workspace & Agent Management (5 tools)
 `agent_session` `spawn_agents` `list_spawned_agents` `agent_output` `stop_agent`
 
 ### Other (8 tools)

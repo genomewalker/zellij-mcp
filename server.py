@@ -20,10 +20,15 @@ server = Server("zellij-mcp")
 
 
 # =============================================================================
-# AGENT SESSION - Isolated workspace for autonomous operations
+# WORKSPACE TABS - Organized workspaces within current session
 # =============================================================================
+# NOTE: Previously used agent session isolation, but Zellij doesn't support
+# creating panes in detached sessions. Now uses tab-based organization instead.
+# Tabs like "agent-work", "shepherd", etc. keep agent work separate while
+# staying in the attached session where pane operations actually work.
 
-AGENT_SESSION = "zellij-agent"  # Dedicated session for agent work
+AGENT_SESSION = "zellij-agent"  # DEPRECATED: Kept for backwards compatibility
+DEFAULT_WORKSPACE_TAB = "agent-work"  # Default tab for autonomous operations
 
 
 def get_active_sessions() -> list[str]:
@@ -246,6 +251,8 @@ class PaneInfo:
     cwd: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     repl_type: Optional[str] = None
+    pane_index: Optional[int] = None  # Index within tab at creation time
+    floating: bool = False  # Whether pane is floating
 
 
 @dataclass
@@ -294,9 +301,11 @@ class SessionState:
         self.spawned_agents: dict[str, SpawnedAgent] = {}  # For task-based agent tracking
 
     def register_pane(self, name: str, tab: str, command: str = None,
-                      cwd: str = None, repl_type: str = None) -> PaneInfo:
+                      cwd: str = None, repl_type: str = None,
+                      pane_index: int = None, floating: bool = False) -> PaneInfo:
         """Register a named pane. Thread-safe."""
-        pane = PaneInfo(name=name, tab=tab, command=command, cwd=cwd, repl_type=repl_type)
+        pane = PaneInfo(name=name, tab=tab, command=command, cwd=cwd,
+                        repl_type=repl_type, pane_index=pane_index, floating=floating)
         with self._lock:
             self.panes[name] = pane
         return pane
@@ -329,32 +338,76 @@ def parse_layout_panes(layout_text: str) -> list[dict]:
     tab_focused = False
     pane_index_in_tab = 0
     floating_depth = 0  # Track brace depth for floating_panes block
+    current_pane = None  # Track current pane block for multi-line parsing
+    pane_brace_depth = 0  # Track brace depth within pane block
+    swap_layout_depth = 0  # Track depth inside swap_* template sections
 
     for line in layout_text.split('\n'):
         stripped = line.strip()
 
-        # Track floating panes section with brace depth
-        if 'floating_panes' in stripped:
-            floating_depth = 1
-            # Count opening braces on this line
-            floating_depth += stripped.count('{') - 1  # -1 because we start at 1
+        # Skip swap_tiled_layout and swap_floating_layout sections (templates, not real panes)
+        if stripped.startswith('swap_tiled_layout') or stripped.startswith('swap_floating_layout'):
+            swap_layout_depth = 1
+            swap_layout_depth += stripped.count('{') - 1
             continue
-        if floating_depth > 0:
-            floating_depth += stripped.count('{')
-            floating_depth -= stripped.count('}')
-            if floating_depth <= 0:
-                floating_depth = 0
+        if swap_layout_depth > 0:
+            swap_layout_depth += stripped.count('{')
+            swap_layout_depth -= stripped.count('}')
+            if swap_layout_depth <= 0:
+                swap_layout_depth = 0
+            continue
+
+        # Skip new_tab_template section (template, not real panes)
+        if stripped.startswith('new_tab_template'):
+            swap_layout_depth = 1
+            swap_layout_depth += stripped.count('{') - 1
+            continue
+
+        # Track floating panes section with brace depth
+        # Note: must check startswith, not 'in', to avoid matching 'hide_floating_panes=true'
+        if stripped.startswith('floating_panes') and current_pane is None:
+            floating_depth = 1
+            floating_depth += stripped.count('{') - 1
+            continue
+        if floating_depth > 0 and current_pane is None:
+            # Check if this is a pane start within floating_panes
+            if re.match(r'\s*pane\b', stripped):
+                pass  # Let it fall through to pane handling
+            else:
+                floating_depth += stripped.count('{')
+                floating_depth -= stripped.count('}')
+                if floating_depth <= 0:
+                    floating_depth = 0
                 continue
 
         in_floating = floating_depth > 0
 
         # Match tab lines
         tab_match = re.search(r'tab\s+name="([^"]+)".*?(focus=true)?', line)
-        if tab_match:
+        if tab_match and current_pane is None:
             current_tab = tab_match.group(1)
             current_tab_index += 1
             tab_focused = tab_match.group(2) is not None
             pane_index_in_tab = 0
+            continue
+
+        # Handle content inside a pane block
+        if current_pane is not None:
+            pane_brace_depth += stripped.count('{')
+            pane_brace_depth -= stripped.count('}')
+
+            # Extract args from inside pane block
+            args_match = re.search(r'args\s+(.+)', stripped)
+            if args_match:
+                # Parse the args string - format: "arg1" "arg2" "arg3"
+                args_str = args_match.group(1)
+                current_pane["args"] = args_str
+
+            # Check if pane block ended
+            if pane_brace_depth <= 0:
+                panes.append(current_pane)
+                current_pane = None
+                pane_brace_depth = 0
             continue
 
         # Match pane lines (any pane, not just named ones)
@@ -391,20 +444,54 @@ def parse_layout_panes(layout_text: str) -> list[dict]:
             if cwd_match:
                 pane_info["cwd"] = cwd_match.group(1)
 
-            # Include all panes to allow index-based navigation
+            # Check if pane has a block (contains '{')
+            if '{' in stripped:
+                pane_brace_depth = stripped.count('{') - stripped.count('}')
+                if pane_brace_depth > 0:
+                    current_pane = pane_info
+                    continue
+
+            # Simple pane without block
             panes.append(pane_info)
 
     return panes
 
 
-def find_pane_by_name(panes: list[dict], name: str) -> Optional[dict]:
-    """Find a pane by name or command (case-insensitive partial match)."""
+def find_pane_by_name(panes: list[dict], name: str, registered_pane: PaneInfo = None) -> Optional[dict]:
+    """Find a pane by name, command, args marker, or registered index."""
     name_lower = name.lower()
+    marker = f"ZELLIJ_PANE_NAME={name}"
+    marker_lower = marker.lower()
+
     for p in panes:
         pane_name = p.get("name", "").lower()
         pane_cmd = p.get("command", "").lower()
+        pane_args = p.get("args", "").lower()
+
+        # Match by name or command (existing behavior)
         if name_lower in pane_name or name_lower in pane_cmd:
             return p
+        # Match by ZELLIJ_PANE_NAME marker in args
+        if marker_lower in pane_args:
+            return p
+
+    # If not found by name/command, try registered pane index
+    if registered_pane and registered_pane.pane_index is not None:
+        reg_tab = registered_pane.tab
+        reg_index = registered_pane.pane_index
+        is_floating = registered_pane.floating
+
+        # Filter panes by tab and floating status
+        for p in panes:
+            p_tab = p.get("tab")
+            p_floating = p.get("floating", False)
+            p_index = p.get("pane_index", -1)
+
+            # Match: same tab (or "current"), same floating status, same index
+            if (p_tab == reg_tab or reg_tab == "current") and \
+               p_floating == is_floating and p_index == reg_index:
+                return p
+
     return None
 
 
@@ -488,7 +575,10 @@ async def _with_pane_focus_impl(pane_name: str, action_fn: Callable, session: st
         return {"success": False, "error": "Failed to get layout", "details": layout_result}
 
     panes = parse_layout_panes(layout_result.get("stdout", ""))
-    target_pane = find_pane_by_name(panes, pane_name)
+
+    # Look up registered pane info for index-based matching
+    registered_pane = state.panes.get(pane_name)
+    target_pane = find_pane_by_name(panes, pane_name, registered_pane)
 
     if not target_pane:
         return {"success": False, "error": f"Pane '{pane_name}' not found",
@@ -941,21 +1031,21 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
-        # === AGENT SESSION ===
+        # === WORKSPACE MANAGEMENT ===
         Tool(
             name="agent_session",
-            description="Manage the isolated agent session (zellij-agent). Creates if needed. Returns session info.",
+            description="Manage workspace tabs for agent operations. Creates 'agent-work' tab if needed. DEPRECATED: Session isolation doesn't work in Zellij; now uses tab-based workspaces.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["status", "create", "destroy"],
-                               "description": "Action: status (default), create, or destroy", "default": "status"},
+                               "description": "Action: status (default), create workspace tab, or destroy workspace tab", "default": "status"},
                 },
             },
         ),
         Tool(
             name="spawn_agents",
-            description="Spawn multiple Claude agents in parallel, each working on a task. Creates panes in agent session.",
+            description="Spawn multiple Claude agents in parallel, each working on a task. Creates panes in a dedicated tab.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1434,10 +1524,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result = zellij_action("clear", session=session)
 
     elif name == "read_pane":
-        # Use agent session by default when targeting named panes
+        # Panes are now in current session (tab-based workspaces)
         pane_name = arguments.get("pane_name")
-        if pane_name:
-            session = session or get_agent_session()
 
         do_strip = arguments.get("strip_ansi", True)
         tail_lines = arguments.get("tail")
@@ -1495,8 +1583,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     result = {"success": True, "message": "Pane is in current tab - use direction keys to navigate", "pane": target_pane}
 
     elif name == "write_to_pane":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Panes are in current session (tab-based workspaces)
 
         pane_name = arguments["pane_name"]
         chars = arguments["chars"]
@@ -1509,10 +1596,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result = await with_pane_focus(pane_name, do_write, session=session)
 
     elif name == "send_keys":
-        # Use agent session by default when targeting named panes
+        # Panes are in current session (tab-based workspaces)
         pane_name = arguments.get("pane_name")
-        if pane_name:
-            session = session or get_agent_session()
 
         keys = arguments["keys"].lower()
         repeat = arguments.get("repeat", 1)
@@ -1533,10 +1618,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result = await do_send()
 
     elif name == "search_pane":
-        # Use agent session by default when targeting named panes
+        # Panes are in current session (tab-based workspaces)
         pane_name = arguments.get("pane_name")
-        if pane_name:
-            session = session or get_agent_session()
 
         pattern = arguments["pattern"]
         context = arguments.get("context", 0)
@@ -1575,10 +1658,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # === MONITORING ===
     elif name == "wait_for_output":
-        # Use agent session by default when targeting named panes
+        # Panes are in current session (tab-based workspaces)
         pane_name = arguments.get("pane_name")
-        if pane_name:
-            session = session or get_agent_session()
 
         pattern = arguments["pattern"]
         timeout = arguments.get("timeout", 30)
@@ -1625,10 +1706,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             }
 
     elif name == "wait_for_idle":
-        # Use agent session by default when targeting named panes
+        # Panes are in current session (tab-based workspaces)
         pane_name = arguments.get("pane_name")
-        if pane_name:
-            session = session or get_agent_session()
 
         stable_seconds = arguments.get("stable_seconds", 3.0)
         timeout = arguments.get("timeout", 60)
@@ -1679,10 +1758,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             }
 
     elif name == "tail_pane":
+        # Panes are in current session (tab-based workspaces)
         pane_name = arguments.get("pane_name")
-        # Use agent session by default when targeting named panes
-        if pane_name:
-            session = session or get_agent_session()
 
         reset = arguments.get("reset", False)
 
@@ -1721,8 +1798,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # === COMPOUND OPERATIONS ===
     elif name == "run_in_pane":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Panes are in current session (tab-based workspaces)
 
         pane_name = arguments["pane_name"]
         command = arguments["command"]
@@ -1755,8 +1831,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result["output"] = wait_result.get("output", "")
 
     elif name == "create_named_pane":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Use current session by default - pane creation doesn't work in detached sessions
+        # User can explicitly specify session if needed
         # Invalidate cache since we may mutate layout
         layout_cache.invalidate(session)
 
@@ -1808,71 +1884,59 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     panes = parse_layout_panes(layout_result.get("stdout", ""))
                     direction = calculate_grid_direction(len(panes))
 
-            # Create the pane
-            # Use 'zellij run' when command specified to avoid suspended panes in detached sessions
-            # 'zellij action new-pane' creates suspended panes, 'zellij run' starts immediately
+            # Count panes before creation (to determine new pane's index)
+            pre_layout = zellij_action("dump-layout", capture=True, session=session)
+            pre_pane_count = 0
+            current_tab_name = None
+            if pre_layout.get("success"):
+                pre_panes = parse_layout_panes(pre_layout.get("stdout", ""))
+                # Get focused tab name or first tab
+                for p in pre_panes:
+                    if p.get("tab_focused") or (current_tab_name is None and p.get("tab")):
+                        current_tab_name = p.get("tab")
+                        if p.get("tab_focused"):
+                            break
+                # Count panes in current tab (excluding plugins)
+                tab_panes = [p for p in pre_panes
+                             if p.get("tab") == current_tab_name
+                             and not (p.get("command") and "plugin" in str(p.get("command", "")))]
+                pre_pane_count = len(tab_panes)
+
+            # Create the pane using 'action new-pane' (works in detached sessions)
+            args = ["action", "new-pane", "--name", pane_name]
+            if floating:
+                args.append("--floating")
+            if direction:
+                args.extend(["--direction", direction])
+            if cwd:
+                args.extend(["--cwd", cwd])
             if command:
-                args = ["run", "--name", pane_name]
-                if floating:
-                    args.append("--floating")
-                if direction:
-                    args.extend(["--direction", direction])
-                if cwd:
-                    args.extend(["--cwd", cwd])
-                # Complex commands need shell wrapping
-                if any(c in command for c in [' ', '|', '&', ';', '>', '<', '$', '`']):
-                    args.extend(["--", "bash", "-c", command])
-                else:
-                    args.extend(["--", command])
-                create_result = run_zellij(*args, session=session)
-            else:
-                # No command - use new-pane for an empty shell
-                args = ["action", "new-pane", "--name", pane_name]
-                if floating:
-                    args.append("--floating")
-                if direction:
-                    args.extend(["--direction", direction])
-                if cwd:
-                    args.extend(["--cwd", cwd])
-                create_result = run_zellij(*args, session=session)
+                args.extend(["--", command])
+            create_result = run_zellij(*args, session=session)
+
             if create_result.get("success"):
-                # BUG FIX: In detached sessions, new pane may not be focused
-                # Wait briefly for pane creation to complete, then rename
+                # Wait briefly for pane to initialize
                 time.sleep(0.3)
 
-                # Rename pane to ensure name persists in layout
-                # The new pane SHOULD be focused after creation, but verify
-                rename_result = zellij_action("rename-pane", pane_name, session=session)
-
-                # Verify rename worked by checking layout
+                # Write a unique marker to the pane content for identification
+                # The new pane should be focused after creation
+                marker = f"# ZELLIJ_PANE_ID={pane_name}"
+                zellij_action("write-chars", f"echo '{marker}'", session=session)
+                time.sleep(0.1)
+                zellij_action("write-chars", "\n", session=session)
                 time.sleep(0.2)
-                verify_layout = zellij_action("dump-layout", capture=True, session=session)
-                if verify_layout.get("success"):
-                    if f'name="{pane_name}"' not in verify_layout.get("stdout", ""):
-                        # Rename didn't work - try focusing newest pane and retry
-                        # Get all panes, find one without custom name that matches our criteria
-                        panes = parse_layout_panes(verify_layout.get("stdout", ""))
-                        # The newest pane is typically last in layout or has our command
-                        for p in reversed(panes):
-                            p_cmd = p.get("command", "")
-                            p_name = p.get("name", "")
-                            # Match by command or find unnamed shell
-                            if (command and command.split()[0] in p_cmd) or \
-                               (not command and p_name in ("", "shell", "Unnamed")):
-                                # Found likely target - navigate to its tab
-                                if p.get("tab") and not p.get("tab_focused"):
-                                    zellij_action("go-to-tab-name", p["tab"], session=session)
-                                    time.sleep(0.1)
-                                # Retry rename
-                                zellij_action("rename-pane", pane_name, session=session)
-                                break
 
-                # Register in state
+                # New pane index = pre_pane_count (0-indexed)
+                new_pane_index = pre_pane_count
+
+                # Register in state with index for later lookup
                 pane_info = state.register_pane(
                     name=pane_name,
-                    tab=tab or "current",
+                    tab=tab or current_tab_name or "current",
                     command=command,
                     cwd=cwd,
+                    pane_index=new_pane_index,
+                    floating=floating or False,
                 )
                 result = {"success": True, "created": True, "pane": pane_info.__dict__,
                           "direction": direction}
@@ -1886,8 +1950,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = {"success": False, "error": "Unexpected state in create_named_pane"}
 
     elif name == "destroy_named_pane":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Use current session - panes are now created in workspace tabs
         # Invalidate cache since we're mutating layout
         layout_cache.invalidate(session)
 
@@ -1911,8 +1974,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 layout_cache.invalidate(session)
 
     elif name == "list_named_panes":
-        # Use agent session by default for named pane operations
-        session = session or get_agent_session()
+        # Use current session by default (same as create_named_pane)
 
         # Get live layout
         layout_result = zellij_action("dump-layout", capture=True, session=session)
@@ -1922,10 +1984,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         # Reconcile with registry
         pane_list = []
-        for name, pane in state.panes.items():
-            found = find_pane_by_name(live_panes, name)
+        for pane_name_key, pane in state.panes.items():
+            found = find_pane_by_name(live_panes, pane_name_key, pane)
             pane_list.append({
-                "name": name,
+                "name": pane_name_key,
                 "tab": pane.tab,
                 "command": pane.command,
                 "alive": found is not None,
@@ -1936,8 +1998,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # === REPL ===
     elif name == "repl_execute":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Panes are in current session (tab-based workspaces)
 
         pane_name = arguments["pane_name"]
         code = arguments["code"]
@@ -1989,8 +2050,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             }
 
     elif name == "repl_interrupt":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Panes are in current session (tab-based workspaces)
 
         pane_name = arguments["pane_name"]
         should_wait = arguments.get("wait_for_prompt", True)
@@ -2016,8 +2076,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # === SSH/HPC ===
     elif name == "ssh_connect":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Panes are in current session (tab-based workspaces)
 
         ssh_name = arguments["name"]
         host = arguments["host"]
@@ -2061,8 +2120,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = create_result
 
     elif name == "ssh_run":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Panes are in current session (tab-based workspaces)
 
         ssh_name = arguments["name"]
         command = arguments["command"]
@@ -2095,8 +2153,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 }
 
     elif name == "job_submit":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Panes are in current session (tab-based workspaces)
 
         ssh_name = arguments["ssh_name"]
         script = arguments["script"]
@@ -2140,8 +2197,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result = read_result
 
     elif name == "job_status":
-        # Use agent session by default to avoid stealing focus
-        session = session or get_agent_session()
+        # Panes are in current session (tab-based workspaces)
 
         job_id = arguments.get("job_id")
         ssh_name = arguments.get("ssh_name")
@@ -2692,48 +2748,60 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             args.extend(["--args", *arguments["args"]])
         result = zellij_action(*args, session=session)
 
-    # === AGENT SESSION ===
+    # === WORKSPACE MANAGEMENT ===
     elif name == "agent_session":
+        # DEPRECATED: Agent session isolation doesn't work (Zellij can't create
+        # panes in detached sessions). Now uses tab-based workspaces instead.
         action = arguments.get("action", "status")
 
         if action == "create":
-            success = ensure_agent_session()
-            if success:
-                result = {
-                    "success": True,
-                    "session": AGENT_SESSION,
-                    "message": f"Agent session '{AGENT_SESSION}' is ready"
-                }
-            else:
-                result = {
-                    "success": False,
-                    "error": f"Failed to create agent session '{AGENT_SESSION}'"
-                }
-        elif action == "status":
-            sessions = get_active_sessions()
-            exists = AGENT_SESSION in sessions
+            # Instead of creating a separate session, create a workspace tab
+            workspace_tab = DEFAULT_WORKSPACE_TAB
+            layout_result = zellij_action("dump-layout", capture=True, session=session)
+            tab_exists = False
+            if layout_result.get("success"):
+                if f'name="{workspace_tab}"' in layout_result.get("stdout", ""):
+                    tab_exists = True
+            if not tab_exists:
+                zellij_action("new-tab", "--name", workspace_tab, session=session)
             result = {
                 "success": True,
-                "session": AGENT_SESSION,
-                "exists": exists,
-                "all_sessions": sessions
+                "workspace_tab": workspace_tab,
+                "message": f"Workspace tab '{workspace_tab}' ready in current session",
+                "note": "Session isolation deprecated - using tab-based workspaces now"
+            }
+        elif action == "status":
+            sessions = get_active_sessions()
+            # Check for workspace tabs in current session
+            layout_result = zellij_action("dump-layout", capture=True, session=session)
+            workspace_tabs = []
+            if layout_result.get("success"):
+                layout = layout_result.get("stdout", "")
+                # Find all tab names
+                for match in re.finditer(r'tab name="([^"]+)"', layout):
+                    workspace_tabs.append(match.group(1))
+            result = {
+                "success": True,
+                "workspace_tabs": workspace_tabs,
+                "all_sessions": sessions,
+                "note": "Using tab-based workspaces (session isolation deprecated)"
             }
         elif action == "destroy":
-            # Kill the agent session
-            try:
-                subprocess.run(
-                    ["zellij", "kill-session", AGENT_SESSION],
-                    capture_output=True, timeout=10
-                )
-                result = {"success": True, "destroyed": AGENT_SESSION}
-            except Exception as e:
-                result = {"success": False, "error": str(e)}
+            # Close the workspace tab if it exists
+            workspace_tab = DEFAULT_WORKSPACE_TAB
+            zellij_action("go-to-tab-name", workspace_tab, session=session)
+            time.sleep(0.2)
+            zellij_action("close-tab", session=session)
+            result = {
+                "success": True,
+                "closed_tab": workspace_tab,
+                "note": "Closed workspace tab (session isolation deprecated)"
+            }
         else:
             result = {"success": False, "error": f"Unknown action: {action}"}
 
     elif name == "spawn_agents":
-        # Spawn multiple Claude agents in parallel
-        session = get_agent_session()
+        # Spawn multiple Claude agents in parallel in current session (tab-based workspaces)
         tasks = arguments.get("tasks", [])
         tab = arguments.get("tab", "agents")
         skip_permissions = arguments.get("dangerously_skip_permissions", False)
@@ -2741,9 +2809,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if not tasks:
             result = {"success": False, "error": "No tasks provided"}
         else:
-            # Ensure agent session exists
-            ensure_agent_session()
-
             # Create tab for agents if needed
             layout_result = zellij_action("dump-layout", capture=True, session=session)
             if layout_result.get("success") and f'name="{tab}"' not in layout_result.get("stdout", ""):
@@ -2839,8 +2904,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if not agent:
             result = {"success": False, "error": f"Agent '{agent_name}' not found"}
         else:
-            session = get_agent_session()
-
+            # Panes are in current session (tab-based workspaces)
             async def do_read():
                 args = ["dump-screen", "/dev/stdout", "--full"]
                 return zellij_action(*args, capture=True, session=session)
@@ -2870,8 +2934,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if not agent:
             result = {"success": False, "error": f"Agent '{agent_name}' not found"}
         else:
-            session = get_agent_session()
-
+            # Panes are in current session (tab-based workspaces)
             async def do_interrupt():
                 return zellij_action("write", "3", session=session)  # Ctrl+C
 

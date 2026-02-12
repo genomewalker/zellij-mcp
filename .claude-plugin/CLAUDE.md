@@ -4,44 +4,43 @@ Autonomous Zellij control for Claude Code. 57 tools for pane management, output 
 
 ## Key Features
 
-- **No focus stealing** - Agent works in isolated session, you keep working undisturbed
+- **Tab-based workspaces** - Agent work is organized into dedicated tabs, switch tabs to observe progress
 - **Pane targeting** - Work with any pane by name, not just focused
 - **Output monitoring** - Wait for patterns, tail new output, search history
 - **REPL interaction** - Execute code in IPython/R/Julia, capture output
 - **SSH/HPC** - Manage SSH sessions, submit SLURM/PBS jobs
 - **Autonomous workflows** - Run commands and wait for completion
 
-## Agent Session Isolation
+## Tab-Based Workspaces
 
-By default, all autonomous operations run in a separate `zellij-agent` session. This means:
-- **You keep working** - Your current pane/tab focus is never stolen
-- **No visual interruption** - Agent panes don't appear in your session
-- **Full isolation** - Agent crashes don't affect your session
+Agent operations are organized into dedicated tabs within your current session:
+- **Organized work** - Create tabs like "analysis", "build", "hpc" to group related panes
+- **Easy observation** - Switch to agent tabs when you want to see what's happening
+- **Tab isolation** - Agent work in other tabs doesn't clutter your current view
 
-The agent session is created automatically when needed.
-
-### Agent Session Tool
+### Workspace Tool
 
 | Tool | Description |
 |------|-------------|
-| `agent_session` | Manage the agent session. Params: `action` (create/status/destroy) |
+| `agent_session` | Manage workspace tabs. Params: `action` (create/status/destroy) |
 
 ```python
-# Check agent session status
+# Check workspace status and list tabs
 agent_session(action="status")
 
-# Explicitly create (usually automatic)
+# Create default workspace tab (agent-work)
 agent_session(action="create")
 
-# Destroy when done
+# Close workspace tab when done
 agent_session(action="destroy")
 ```
 
-### Override Session
+### Custom Tabs
 
-To run in your current session instead (steals focus):
+Create panes in specific tabs for organization:
 ```python
-create_named_pane(name="mywork", session="your-session-name")
+create_named_pane(name="worker", tab="build")  # Creates in "build" tab
+create_named_pane(name="analysis", tab="data") # Creates in "data" tab
 ```
 
 ## Quick Start
@@ -258,7 +257,7 @@ Before operating on panes, verify they exist:
 # List all panes to see what's available
 list_panes()  # Shows names, commands, focus state
 
-# For agent session panes specifically
+# List registered named panes
 list_named_panes()  # Shows registered panes and if they're still alive
 ```
 

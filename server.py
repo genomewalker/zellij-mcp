@@ -457,41 +457,26 @@ async def with_pane_focus(pane_name: str, action_fn: Callable, session: str = No
             return {"success": False, "error": "Failed to switch tab", "details": tab_result}
 
     # Navigate to the pane within the tab using focus cycling
-    # This is a simple approach - cycle through panes until we find the target
-    # For more complex layouts, directional navigation would be needed
+    # For detached sessions, we use pane index to determine how many cycles needed
     if not target_pane.get("focused"):
-        # Cycle through panes to find the one with matching name/command
-        max_cycles = 20  # Prevent infinite loop
-        found = False
-        for _ in range(max_cycles):
-            # Check current focused pane (use cache if available)
-            cached_layout = layout_cache.get(session)
-            if cached_layout:
-                check_result = {"success": True, "stdout": cached_layout}
-            else:
-                check_result = zellij_action("dump-layout", capture=True, session=session)
-                if check_result.get("success"):
-                    layout_cache.set(check_result.get("stdout", ""), session)
+        # Count panes in the target tab (excluding plugins like tab-bar, status-bar)
+        tab_panes = [p for p in panes if p.get("tab") == target_pane.get("tab")
+                     and p.get("command") and "plugin" not in str(p.get("command", ""))]
 
-            if check_result.get("success"):
-                current_panes = parse_layout_panes(check_result.get("stdout", ""))
-                for p in current_panes:
-                    if p.get("focused"):
-                        # Check if this is our target
-                        if (p.get("name") == target_pane.get("name") and target_pane.get("name")) or \
-                           (p.get("command") == target_pane.get("command") and target_pane.get("command")):
-                            found = True
-                            break
-                        break  # Found focused pane but not target, continue cycling
+        target_index = target_pane.get("pane_index", 0)
 
-            if found:
-                break
-            # Cycle to next pane (invalidate cache as focus changes)
+        # In detached sessions, nothing is "focused" in the layout
+        # We just cycle to the pane by index
+        # First, reset to a known state by cycling through all panes once
+        num_panes = len(tab_panes) if tab_panes else 1
+
+        # Cycle to target pane (use modulo to handle wrapping)
+        cycles_needed = target_index % num_panes if num_panes > 0 else 0
+
+        for _ in range(cycles_needed):
             zellij_action("focus-next-pane", session=session)
-            layout_cache.invalidate(session)
 
-        if not found:
-            return {"success": False, "error": f"Could not focus pane '{pane_name}' after {max_cycles} cycles"}
+        layout_cache.invalidate(session)
 
     # Execute the action
     try:

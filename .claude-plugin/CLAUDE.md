@@ -1,199 +1,182 @@
 # zellij-mcp
 
-Control Zellij terminal multiplexer from Claude Code. All tools support cross-session targeting via the `session` parameter.
+Autonomous Zellij control for Claude Code. 56 tools for pane management, output monitoring, REPL interaction, and SSH/HPC workflows.
 
-## Cross-Session Support
+## Key Features
 
-All tools accept an optional `session` parameter to target a different Zellij session:
+- **Pane targeting** - Work with any pane by name, not just focused
+- **Output monitoring** - Wait for patterns, tail new output, search history
+- **REPL interaction** - Execute code in IPython/R/Julia, capture output
+- **SSH/HPC** - Manage SSH sessions, submit SLURM/PBS jobs
+- **Autonomous workflows** - Run commands and wait for completion
 
+## Quick Start
+
+```python
+# Create a named pane
+create_named_pane(name="analysis", command="ipython3", tab="work")
+
+# Run code and capture output
+repl_execute(pane_name="analysis", code="import pandas as pd\ndf = pd.read_csv('data.csv')\nprint(df.shape)")
+
+# Wait for completion
+wait_for_output(pane_name="analysis", pattern=r"In \[\d+\]:")
 ```
-new_pane --session other-session --command "htop"
-run_command --session other-session --command "git status"
-```
 
-Use `list_sessions` to discover available sessions.
+## Tools by Category
 
-## Tools Reference
+### Core I/O (Pane Targeting)
+
+| Tool | Description |
+|------|-------------|
+| `read_pane` | Read content from any pane by name. Params: `pane_name`, `full`, `tail`, `strip_ansi` |
+| `write_to_pane` | Send text to a named pane. Params: `pane_name`, `chars`, `press_enter` |
+| `send_keys` | Send special keys (ctrl+c, arrows, etc). Params: `pane_name`, `keys`, `repeat` |
+| `search_pane` | Search pane content with regex. Params: `pane_name`, `pattern`, `context` |
+| `write_chars` | Send characters to focused pane. Params: `chars` |
+
+### Monitoring
+
+| Tool | Description |
+|------|-------------|
+| `wait_for_output` | Wait for regex pattern to appear. Params: `pane_name`, `pattern`, `timeout` |
+| `wait_for_idle` | Wait until output stops changing. Params: `pane_name`, `stable_seconds`, `timeout` |
+| `tail_pane` | Get only new output since last read. Params: `pane_name`, `reset` |
+
+### Compound Operations
+
+| Tool | Description |
+|------|-------------|
+| `run_in_pane` | Run command and wait for completion. Params: `pane_name`, `command`, `wait`, `timeout`, `capture` |
+| `create_named_pane` | Create pane with name (idempotent). Params: `name`, `command`, `tab`, `direction`, `floating`, `cwd` |
+| `destroy_named_pane` | Close named pane. Params: `name` |
+| `list_named_panes` | List all registered panes with status |
+
+### REPL Interaction
+
+| Tool | Description |
+|------|-------------|
+| `repl_execute` | Execute code in REPL and capture output. Params: `pane_name`, `code`, `repl_type`, `timeout` |
+| `repl_interrupt` | Send Ctrl+C to interrupt. Params: `pane_name`, `wait_for_prompt` |
+
+### SSH/HPC
+
+| Tool | Description |
+|------|-------------|
+| `ssh_connect` | Open SSH session in named pane. Params: `name`, `host`, `tab`, `port`, `identity_file` |
+| `ssh_run` | Execute command on remote host. Params: `name`, `command`, `wait`, `timeout` |
+| `job_submit` | Submit SLURM/PBS job and track. Params: `ssh_name`, `script`, `scheduler`, `extra_args` |
+| `job_status` | Check tracked job status. Params: `job_id`, `ssh_name` |
 
 ### Pane Management
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `new_pane` | Create pane | `direction`, `floating`, `command`, `name`, `cwd`, `in_place`, `close_on_exit` |
-| `close_pane` | Close focused pane | |
-| `focus_pane` | Move focus | `direction` (down/right/up/left) |
-| `focus_next_pane` | Focus next pane | |
-| `focus_previous_pane` | Focus previous pane | |
-| `move_pane` | Move pane location | `direction` |
-| `move_pane_backwards` | Rotate pane backwards | |
-| `resize_pane` | Resize pane border | `direction`, `increase` (bool) |
-| `rename_pane` | Set pane name | `name` |
-| `undo_rename_pane` | Remove custom name | |
-| `toggle_floating` | Toggle floating panes | |
-| `toggle_fullscreen` | Toggle fullscreen | |
-| `toggle_embed_or_floating` | Toggle pane embed/float | |
-| `toggle_pane_frames` | Toggle UI frames | |
-| `toggle_sync_tab` | Send to all panes in tab | |
-| `stack_panes` | Stack panes together | `pane_ids` (array) |
+| Tool | Description |
+|------|-------------|
+| `new_pane` | Create pane. Params: `direction`, `floating`, `command`, `name`, `cwd` |
+| `close_pane` | Close focused pane |
+| `focus_pane` | Move focus by direction. Params: `direction` |
+| `focus_pane_by_name` | Focus pane by name. Params: `name` |
+| `focus_next_pane` / `focus_previous_pane` | Cycle focus |
+| `move_pane` | Move pane location. Params: `direction` |
+| `resize_pane` | Resize pane. Params: `direction`, `increase` |
+| `rename_pane` | Set pane name. Params: `name` |
+| `toggle_floating` | Toggle floating panes visibility |
+| `toggle_fullscreen` | Toggle fullscreen |
+| `clear_pane` | Clear pane buffers |
 
 ### Tab Management
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `new_tab` | Create tab | `name`, `layout`, `cwd` |
-| `close_tab` | Close current tab | |
-| `focus_tab` | Switch tab | `index` (1-based), `name`, or `direction` (next/previous) |
-| `move_tab` | Move tab | `direction` (left/right) |
-| `rename_tab` | Set tab name | `name` |
-| `undo_rename_tab` | Remove custom name | |
-| `query_tab_names` | List all tab names | |
+| Tool | Description |
+|------|-------------|
+| `new_tab` | Create tab. Params: `name`, `layout`, `cwd` |
+| `close_tab` | Close current tab |
+| `focus_tab` | Switch tab. Params: `index`, `name`, `direction` |
+| `move_tab` | Move tab. Params: `direction` |
+| `rename_tab` | Set tab name. Params: `name` |
+| `query_tab_names` | List all tab names |
 
-### Scrolling
+### Session & Layout
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `scroll` | Scroll in pane | `direction` (up/down), `amount` (line/half_page/page/top/bottom) |
+| Tool | Description |
+|------|-------------|
+| `list_sessions` | List all Zellij sessions |
+| `list_panes` | List all panes with metadata |
+| `session_info` | Current session info |
+| `dump_layout` | Export current layout |
+| `swap_layout` | Cycle layouts |
 
-### Text/Commands
+## Workflow Examples
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `write_chars` | Send characters | `chars` |
-| `write_bytes` | Send raw bytes | `bytes` (array) |
-| `run_command` | Execute command | `command` (adds Enter) |
-| `clear_pane` | Clear pane buffers | |
+### Bioinformatics Pipeline
+```python
+# Connect to HPC
+ssh_connect(name="hpc", host="user@cluster.edu", tab="remote")
 
-### Edit
+# Submit job
+job_submit(ssh_name="hpc", script="pipeline.sh", scheduler="slurm")
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `edit_file` | Open file in editor pane | `path`, `line`, `floating`, `in_place`, `direction` |
-| `edit_scrollback` | Open scrollback in editor | |
-
-### Session
-
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `list_sessions` | List all sessions | |
-| `list_clients` | List connected clients | |
-| `session_info` | Current session info | |
-| `rename_session` | Rename session | `name` |
-
-### Layout
-
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `dump_layout` | Export current layout | |
-| `dump_screen` | Dump pane to file | `path`, `full` (include scrollback) |
-| `swap_layout` | Cycle layouts | `direction` (next/previous) |
-
-### Mode
-
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `switch_mode` | Change input mode | `mode` (locked/pane/tab/resize/move/search/session/normal) |
-
-### Plugins
-
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `launch_plugin` | Launch Zellij plugin | `url`, `floating`, `in_place`, `skip_cache`, `configuration` |
-| `pipe` | Send data to plugins | `name`, `payload`, `plugin`, `args` |
-
-## Common Workflows
-
-### Open nvim in floating pane
-```
-new_pane --floating --command "nvim src/main.ts"
+# Check status
+job_status()
 ```
 
-### Multi-pane development
-```
-new_pane --direction right --name "server" --command "npm run dev"
-new_pane --direction down --name "tests"
-run_command --command "npm test --watch"
-```
+### Interactive Analysis
+```python
+# Create IPython pane
+create_named_pane(name="ipython", command="ipython3")
 
-### Cross-session command
-```
-list_sessions
-run_command --session other-session --command "git pull"
-```
+# Run analysis
+repl_execute(pane_name="ipython", code="""
+import pandas as pd
+df = pd.read_csv('data.csv')
+print(df.describe())
+""")
 
-### With prism-nvim
-1. `new_pane --floating --command "nvim"` - Open nvim via zellij-mcp
-2. Use prism-nvim tools to edit files in that nvim instance
-3. `new_pane --direction down --command "make test"` - Run tests
-
-## Running Inside Zellij (Claude Code in a pane)
-
-When Claude Code runs inside a Zellij pane, follow these rules:
-
-### Always specify your session
-```
-# Find your session name first
-session_info  # Returns {"session": "<session-name>", "pane_id": "0"}
-
-# Then use session parameter on all commands
-new_tab --session <session-name> --name "build"
-write_chars --session <session-name> --chars "make build"
-dump_screen --session <session-name> --path /tmp/output.txt
+# Interrupt if stuck
+repl_interrupt(pane_name="ipython")
 ```
 
-### Never close your own pane
-`close_pane` on the focused pane will detach/kill the session. Safe pattern:
-```
-# Create work in another tab
-new_tab --session <session-name> --name "work"
+### Parallel Command Execution
+```python
+# Create panes for different tasks
+create_named_pane(name="build", command="bash", tab="dev")
+create_named_pane(name="test", command="bash", tab="dev")
 
-# When done, go back to your tab first
-focus_tab --session <session-name> --name "<your-tab>"
-
-# Then close the work tab (NOT your own)
-close_tab --session <session-name>  # Only if you're NOT on that tab
+# Run commands
+run_in_pane(pane_name="build", command="make build", wait=False)
+run_in_pane(pane_name="test", command="make test", wait=True, timeout=120)
 ```
 
-### dump_screen captures the focused pane
-To capture output from another tab:
-```bash
-# Switch to the target tab, dump, then return
-zellij -s <session-name> action go-to-tab-name work && \
-  zellij -s <session-name> action dump-screen /tmp/output.txt && \
-  zellij -s <session-name> action go-to-tab-name "<your-tab>"
+### Monitor Long-Running Process
+```python
+# Start process
+run_in_pane(pane_name="worker", command="./long_job.sh", wait=False)
+
+# Monitor progress
+tail_pane(pane_name="worker", reset=True)
+# ... later ...
+tail_pane(pane_name="worker")  # Get new output
+
+# Wait for completion
+wait_for_output(pane_name="worker", pattern="Job completed|Error", timeout=3600)
 ```
 
-### Recommended workflow for running commands
+## Special Keys for send_keys
+
 ```
-# 1. Create a dedicated tab
-new_tab --session <session-name> --name "task"
-
-# 2. Type and execute command
-write_chars --session <session-name> --chars "command args"
-write_chars --session <session-name> --chars "\n"  # Press Enter
-
-# 3. Wait, then capture output
-# (use Bash: sleep N)
-dump_screen --session <session-name> --path /tmp/result.txt --full true
-
-# 4. Read the output file
-# (use Read tool)
+ctrl+a through ctrl+z
+tab, enter, escape, backspace, delete, space
+up, down, left, right
+home, end, pageup, pagedown, insert
+f1 through f12
 ```
 
-## Natural Language Mapping
+Example: `send_keys(pane_name="editor", keys="ctrl+c")`
 
-| User says | Tool |
-|-----------|------|
-| "open a new pane" | `new_pane` |
-| "split right with htop" | `new_pane --direction right --command "htop"` |
-| "floating pane" | `new_pane --floating` |
-| "close this pane" | `close_pane` |
-| "focus left/right/up/down" | `focus_pane --direction <dir>` |
-| "fullscreen" | `toggle_fullscreen` |
-| "new tab called X" | `new_tab --name "X"` |
-| "go to tab 2" | `focus_tab --index 2` |
-| "run X" / "execute X" | `run_command --command "X"` |
-| "send X to other session" | `run_command --session other --command "X"` |
-| "list sessions" | `list_sessions` |
-| "scroll up/down" | `scroll --direction up/down` |
-| "scroll to top" | `scroll --direction up --amount top` |
-| "clear the screen" | `clear_pane` |
+## Cross-Session Support
+
+All tools accept `session` parameter to target other Zellij sessions:
+
+```python
+list_sessions()
+read_pane(session="other-session", pane_name="worker")
+```

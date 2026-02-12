@@ -4,13 +4,305 @@
 import json
 import subprocess
 import os
-from typing import Any
+import re
+import asyncio
+import time
+import hashlib
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 server = Server("zellij-mcp")
+
+
+# =============================================================================
+# UTILITIES
+# =============================================================================
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text for clean LLM consumption."""
+    # CSI sequences (colors, cursor movement, etc.)
+    text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+    # OSC sequences (title, hyperlinks, etc.)
+    text = re.sub(r'\x1b\].*?\x07', '', text)
+    # Other escape sequences
+    text = re.sub(r'\x1b[PX^_].*?\x1b\\', '', text)
+    return text
+
+
+# Key name to byte sequence mapping for send_keys
+KEY_SEQUENCES: dict[str, list[int]] = {
+    # Control characters
+    "ctrl+a": [1], "ctrl+b": [2], "ctrl+c": [3], "ctrl+d": [4],
+    "ctrl+e": [5], "ctrl+f": [6], "ctrl+g": [7], "ctrl+h": [8],
+    "ctrl+i": [9], "ctrl+j": [10], "ctrl+k": [11], "ctrl+l": [12],
+    "ctrl+m": [13], "ctrl+n": [14], "ctrl+o": [15], "ctrl+p": [16],
+    "ctrl+q": [17], "ctrl+r": [18], "ctrl+s": [19], "ctrl+t": [20],
+    "ctrl+u": [21], "ctrl+v": [22], "ctrl+w": [23], "ctrl+x": [24],
+    "ctrl+y": [25], "ctrl+z": [26],
+    # Special keys
+    "tab": [9], "enter": [13], "return": [13], "escape": [27], "esc": [27],
+    "backspace": [127], "delete": [27, 91, 51, 126],
+    "space": [32],
+    # Arrow keys
+    "up": [27, 91, 65], "down": [27, 91, 66],
+    "right": [27, 91, 67], "left": [27, 91, 68],
+    # Navigation
+    "home": [27, 91, 72], "end": [27, 91, 70],
+    "pageup": [27, 91, 53, 126], "pagedown": [27, 91, 54, 126],
+    "insert": [27, 91, 50, 126],
+    # Function keys
+    "f1": [27, 79, 80], "f2": [27, 79, 81], "f3": [27, 79, 82], "f4": [27, 79, 83],
+    "f5": [27, 91, 49, 53, 126], "f6": [27, 91, 49, 55, 126],
+    "f7": [27, 91, 49, 56, 126], "f8": [27, 91, 49, 57, 126],
+    "f9": [27, 91, 50, 48, 126], "f10": [27, 91, 50, 49, 126],
+    "f11": [27, 91, 50, 51, 126], "f12": [27, 91, 50, 52, 126],
+}
+
+# REPL prompt patterns for auto-detection
+REPL_PROMPTS: dict[str, str] = {
+    "ipython": r"In \[\d+\]:\s*$",
+    "python": r">>>\s*$",
+    "r": r">\s*$",
+    "julia": r"julia>\s*$",
+    "bash": r"[\$#]\s*$",
+    "zsh": r"[%#]\s*$",
+    "default": r"[\$#>%]\s*$",
+}
+
+
+# =============================================================================
+# SESSION STATE - In-memory registry for panes, SSH sessions, jobs
+# =============================================================================
+
+@dataclass
+class PaneInfo:
+    """Registered pane information."""
+    name: str
+    tab: str
+    command: Optional[str] = None
+    cwd: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    repl_type: Optional[str] = None
+
+
+@dataclass
+class SSHSession:
+    """Registered SSH session."""
+    name: str
+    host: str
+    pane_name: str
+    connected_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class TrackedJob:
+    """Tracked HPC job."""
+    job_id: str
+    scheduler: str  # "slurm" or "pbs"
+    ssh_name: str
+    script: str
+    submitted_at: float = field(default_factory=time.time)
+    status: str = "PENDING"
+
+
+class SessionState:
+    """Server-side state that persists across tool calls within a session."""
+
+    def __init__(self):
+        self.panes: dict[str, PaneInfo] = {}
+        self.ssh_sessions: dict[str, SSHSession] = {}
+        self.tracked_jobs: dict[str, TrackedJob] = {}
+        self.pane_groups: dict[str, list[str]] = {}
+        self.pane_cursors: dict[str, int] = {}  # For tail_pane incremental reads
+
+    def register_pane(self, name: str, tab: str, command: str = None,
+                      cwd: str = None, repl_type: str = None) -> PaneInfo:
+        """Register a named pane."""
+        pane = PaneInfo(name=name, tab=tab, command=command, cwd=cwd, repl_type=repl_type)
+        self.panes[name] = pane
+        return pane
+
+    def unregister_pane(self, name: str) -> bool:
+        """Remove a pane from registry."""
+        if name in self.panes:
+            del self.panes[name]
+            if name in self.pane_cursors:
+                del self.pane_cursors[name]
+            return True
+        return False
+
+    def get_pane(self, name: str) -> Optional[PaneInfo]:
+        """Get registered pane info."""
+        return self.panes.get(name)
+
+
+# Global state instance
+state = SessionState()
+
+
+def parse_layout_panes(layout_text: str) -> list[dict]:
+    """Parse KDL layout to extract pane info with enhanced metadata."""
+    panes = []
+    current_tab = None
+    current_tab_index = 0
+    tab_focused = False
+    pane_index_in_tab = 0
+    in_floating = False
+
+    for line in layout_text.split('\n'):
+        stripped = line.strip()
+
+        # Track floating panes section
+        if 'floating_panes' in stripped:
+            in_floating = True
+            continue
+        if in_floating and stripped.startswith('}'):
+            in_floating = False
+            continue
+
+        # Match tab lines
+        tab_match = re.search(r'tab\s+name="([^"]+)".*?(focus=true)?', line)
+        if tab_match:
+            current_tab = tab_match.group(1)
+            current_tab_index += 1
+            tab_focused = tab_match.group(2) is not None
+            pane_index_in_tab = 0
+            continue
+
+        # Match pane lines (any pane, not just named ones)
+        if re.match(r'\s*pane\b', stripped):
+            pane_info = {
+                "tab": current_tab,
+                "tab_index": current_tab_index,
+                "tab_focused": tab_focused,
+                "pane_index": pane_index_in_tab,
+                "floating": in_floating,
+            }
+            pane_index_in_tab += 1
+
+            # Extract command
+            cmd_match = re.search(r'command="([^"]+)"', line)
+            if cmd_match:
+                pane_info["command"] = cmd_match.group(1)
+
+            # Extract name
+            name_match = re.search(r'name="([^"]+)"', line)
+            if name_match:
+                pane_info["name"] = name_match.group(1)
+
+            # Extract size
+            size_match = re.search(r'size="([^"]+)"', line)
+            if size_match:
+                pane_info["size"] = size_match.group(1)
+
+            # Check if focused
+            pane_info["focused"] = "focus=true" in line and tab_focused
+
+            # Extract cwd if present
+            cwd_match = re.search(r'cwd="([^"]+)"', line)
+            if cwd_match:
+                pane_info["cwd"] = cwd_match.group(1)
+
+            # Only add panes that have useful info (command or name)
+            # or are in the focused tab (so we can navigate)
+            if pane_info.get("command") or pane_info.get("name") or tab_focused:
+                panes.append(pane_info)
+
+    return panes
+
+
+def find_pane_by_name(panes: list[dict], name: str) -> Optional[dict]:
+    """Find a pane by name or command (case-insensitive partial match)."""
+    name_lower = name.lower()
+    for p in panes:
+        pane_name = p.get("name", "").lower()
+        pane_cmd = p.get("command", "").lower()
+        if name_lower in pane_name or name_lower in pane_cmd:
+            return p
+    return None
+
+
+async def with_pane_focus(pane_name: str, action_fn: Callable, session: str = None) -> dict:
+    """
+    Execute action_fn while the named pane is focused, then restore focus.
+
+    This is the core pattern for pane-targeted operations in zellij,
+    which doesn't support pane-id targeting for most actions.
+
+    Args:
+        pane_name: Name of the pane to focus
+        action_fn: Async or sync callable that performs the action
+        session: Target zellij session
+
+    Returns:
+        Result dict from action_fn, with focus restoration info
+    """
+    # Get current layout to find original focus and target pane
+    layout_result = zellij_action("dump-layout", capture=True, session=session)
+    if not layout_result.get("success"):
+        return {"success": False, "error": "Failed to get layout", "details": layout_result}
+
+    panes = parse_layout_panes(layout_result.get("stdout", ""))
+    target_pane = find_pane_by_name(panes, pane_name)
+
+    if not target_pane:
+        return {"success": False, "error": f"Pane '{pane_name}' not found",
+                "available": [p.get("name") or p.get("command") for p in panes]}
+
+    # Find the currently focused pane/tab for restoration
+    original_tab = None
+    for p in panes:
+        if p.get("focused"):
+            original_tab = p.get("tab")
+            break
+
+    # Switch to target tab if needed
+    if not target_pane.get("tab_focused") and target_pane.get("tab"):
+        tab_result = zellij_action("go-to-tab-name", target_pane["tab"], session=session)
+        if not tab_result.get("success"):
+            return {"success": False, "error": "Failed to switch tab", "details": tab_result}
+
+    # Navigate to the pane within the tab using focus cycling
+    # This is a simple approach - cycle through panes until we find the target
+    # For more complex layouts, directional navigation would be needed
+    if not target_pane.get("focused"):
+        # Cycle through panes to find the one with matching name/command
+        max_cycles = 20  # Prevent infinite loop
+        for _ in range(max_cycles):
+            # Check current focused pane
+            check_result = zellij_action("dump-layout", capture=True, session=session)
+            if check_result.get("success"):
+                current_panes = parse_layout_panes(check_result.get("stdout", ""))
+                for p in current_panes:
+                    if p.get("focused"):
+                        # Check if this is our target
+                        if (p.get("name") == target_pane.get("name") and target_pane.get("name")) or \
+                           (p.get("command") == target_pane.get("command") and target_pane.get("command")):
+                            break
+                else:
+                    # Not found, cycle to next pane
+                    zellij_action("focus-next-pane", session=session)
+                    continue
+                break
+
+    # Execute the action
+    try:
+        if asyncio.iscoroutinefunction(action_fn):
+            result = await action_fn()
+        else:
+            result = action_fn()
+    except Exception as e:
+        result = {"success": False, "error": str(e)}
+
+    # Restore original tab focus (pane focus within tab is best-effort)
+    if original_tab and original_tab != target_pane.get("tab"):
+        zellij_action("go-to-tab-name", original_tab, session=session)
+
+    return result
 
 
 def run_zellij(*args: str, capture: bool = False, session: str = None) -> dict[str, Any]:
@@ -270,27 +562,250 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="write_bytes",
-            description="Send raw bytes to the focused pane",
-            inputSchema={
-                "type": "object",
-                "properties": {"bytes": {"type": "array", "items": {"type": "integer"}, "description": "Bytes to send"}},
-                "required": ["bytes"],
-            },
-        ),
-        Tool(
-            name="run_command",
-            description="Run a command in the focused pane (sends command + Enter)",
-            inputSchema={
-                "type": "object",
-                "properties": {"command": {"type": "string", "description": "Command to execute"}},
-                "required": ["command"],
-            },
-        ),
-        Tool(
             name="clear_pane",
             description="Clear all buffers for the focused pane",
             inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="read_pane",
+            description="Read content from any pane by name. Returns cleaned text suitable for LLM processing.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "Target pane name (default: focused pane)"},
+                    "full": {"type": "boolean", "description": "Include full scrollback history"},
+                    "tail": {"type": "integer", "description": "Return only the last N lines"},
+                    "strip_ansi": {"type": "boolean", "description": "Strip ANSI codes (default: true)", "default": True},
+                },
+            },
+        ),
+        Tool(
+            name="list_panes",
+            description="List all panes in the current session with their names, commands, and focus state",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="focus_pane_by_name",
+            description="Focus a pane by its name (searches all tabs)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Pane name to focus"},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="write_to_pane",
+            description="Send characters to a specific named pane without changing visible focus",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "Target pane name"},
+                    "chars": {"type": "string", "description": "Characters to send"},
+                    "press_enter": {"type": "boolean", "description": "Append newline after chars", "default": False},
+                },
+                "required": ["pane_name", "chars"],
+            },
+        ),
+        Tool(
+            name="send_keys",
+            description="Send special key sequences to a pane (ctrl+c, tab, arrows, etc.)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "Target pane (default: focused)"},
+                    "keys": {"type": "string", "description": "Key spec: ctrl+c, ctrl+d, tab, enter, escape, up, down, left, right, etc."},
+                    "repeat": {"type": "integer", "description": "Repeat the key N times", "default": 1},
+                },
+                "required": ["keys"],
+            },
+        ),
+        Tool(
+            name="search_pane",
+            description="Search a pane's content for a regex pattern, returns matching lines",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "Target pane (default: focused)"},
+                    "pattern": {"type": "string", "description": "Python regex pattern to search"},
+                    "context": {"type": "integer", "description": "Lines of context around matches", "default": 0},
+                    "full": {"type": "boolean", "description": "Search full scrollback", "default": True},
+                },
+                "required": ["pattern"],
+            },
+        ),
+        # === MONITORING ===
+        Tool(
+            name="wait_for_output",
+            description="Wait for a regex pattern to appear in pane output. Essential for waiting for command completion.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "Target pane (default: focused)"},
+                    "pattern": {"type": "string", "description": "Regex pattern to wait for"},
+                    "timeout": {"type": "integer", "description": "Max seconds to wait", "default": 30},
+                    "poll_interval": {"type": "number", "description": "Seconds between polls", "default": 1.0},
+                },
+                "required": ["pattern"],
+            },
+        ),
+        Tool(
+            name="wait_for_idle",
+            description="Wait until pane output stops changing (command finished producing output)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "Target pane (default: focused)"},
+                    "stable_seconds": {"type": "number", "description": "How long output must be stable", "default": 3.0},
+                    "timeout": {"type": "integer", "description": "Max seconds to wait", "default": 60},
+                    "poll_interval": {"type": "number", "description": "Seconds between polls", "default": 1.0},
+                },
+            },
+        ),
+        Tool(
+            name="tail_pane",
+            description="Get only new output since last read (incremental monitoring)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "Target pane (default: focused)"},
+                    "reset": {"type": "boolean", "description": "Reset cursor to current position", "default": False},
+                },
+            },
+        ),
+        # === COMPOUND OPERATIONS ===
+        Tool(
+            name="run_in_pane",
+            description="Run a command in a specific pane and optionally wait for completion with output capture",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "Target pane name"},
+                    "command": {"type": "string", "description": "Command to execute"},
+                    "wait": {"type": "boolean", "description": "Wait for completion", "default": True},
+                    "timeout": {"type": "integer", "description": "Max seconds to wait", "default": 30},
+                    "capture": {"type": "boolean", "description": "Return output", "default": True},
+                    "prompt_pattern": {"type": "string", "description": "Regex for shell prompt", "default": "[\\$#>]\\s*$"},
+                },
+                "required": ["pane_name", "command"],
+            },
+        ),
+        Tool(
+            name="create_named_pane",
+            description="Create a pane with a name (idempotent - returns existing if present)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Unique pane name"},
+                    "command": {"type": "string", "description": "Command to run (e.g., ipython3, R)"},
+                    "tab": {"type": "string", "description": "Tab name (creates if needed)"},
+                    "direction": {**DIRECTION_ENUM, "description": "Split direction"},
+                    "floating": {"type": "boolean", "description": "Create as floating"},
+                    "cwd": {"type": "string", "description": "Working directory"},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="destroy_named_pane",
+            description="Close a named pane and remove from registry",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Pane name to close"},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="list_named_panes",
+            description="List all registered panes with their status",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        # === REPL ===
+        Tool(
+            name="repl_execute",
+            description="Execute code in an interactive REPL (IPython, R, Julia) and capture output",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "REPL pane name"},
+                    "code": {"type": "string", "description": "Code to execute (can be multi-line)"},
+                    "repl_type": {"type": "string", "enum": ["ipython", "python", "r", "julia", "bash", "auto"],
+                                  "description": "REPL type for prompt detection", "default": "auto"},
+                    "timeout": {"type": "integer", "description": "Max seconds to wait", "default": 60},
+                },
+                "required": ["pane_name", "code"],
+            },
+        ),
+        Tool(
+            name="repl_interrupt",
+            description="Send Ctrl+C to interrupt a running command in a REPL",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pane_name": {"type": "string", "description": "REPL pane name"},
+                    "wait_for_prompt": {"type": "boolean", "description": "Wait for prompt to return", "default": True},
+                    "timeout": {"type": "integer", "description": "Max seconds to wait", "default": 10},
+                },
+                "required": ["pane_name"],
+            },
+        ),
+        # === SSH/HPC ===
+        Tool(
+            name="ssh_connect",
+            description="Open an SSH connection in a named pane",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name for this SSH session"},
+                    "host": {"type": "string", "description": "SSH host (user@host or config name)"},
+                    "tab": {"type": "string", "description": "Tab to create pane in"},
+                    "port": {"type": "integer", "description": "SSH port"},
+                    "identity_file": {"type": "string", "description": "Path to SSH key"},
+                },
+                "required": ["name", "host"],
+            },
+        ),
+        Tool(
+            name="ssh_run",
+            description="Execute a command on a remote host via existing SSH session",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "SSH session name"},
+                    "command": {"type": "string", "description": "Command to run"},
+                    "wait": {"type": "boolean", "description": "Wait for completion", "default": True},
+                    "timeout": {"type": "integer", "description": "Max seconds to wait", "default": 30},
+                },
+                "required": ["name", "command"],
+            },
+        ),
+        Tool(
+            name="job_submit",
+            description="Submit an HPC job (SLURM/PBS) and track it",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ssh_name": {"type": "string", "description": "SSH session to use"},
+                    "script": {"type": "string", "description": "Path to job script"},
+                    "scheduler": {"type": "string", "enum": ["slurm", "pbs"], "default": "slurm"},
+                    "extra_args": {"type": "string", "description": "Additional sbatch/qsub args"},
+                },
+                "required": ["ssh_name", "script"],
+            },
+        ),
+        Tool(
+            name="job_status",
+            description="Check status of tracked HPC jobs",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "Specific job ID (or check all)"},
+                    "ssh_name": {"type": "string", "description": "SSH session to use"},
+                },
+            },
         ),
         # === EDIT ===
         Tool(
@@ -343,18 +858,6 @@ async def list_tools() -> list[Tool]:
             name="dump_layout",
             description="Dump current layout to stdout",
             inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="dump_screen",
-            description="Dump focused pane content to a file",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Output file path"},
-                    "full": {"type": "boolean", "description": "Include scrollback"},
-                },
-                "required": ["path"],
-            },
         ),
         Tool(
             name="swap_layout",
@@ -546,15 +1049,661 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     elif name == "write_chars":
         result = zellij_action("write-chars", arguments["chars"], session=session)
 
-    elif name == "write_bytes":
-        byte_args = [str(b) for b in arguments["bytes"]]
-        result = zellij_action("write", *byte_args, session=session)
-
-    elif name == "run_command":
-        result = zellij_action("write-chars", arguments["command"] + "\n", session=session)
 
     elif name == "clear_pane":
         result = zellij_action("clear", session=session)
+
+    elif name == "read_pane":
+        pane_name = arguments.get("pane_name")
+        do_strip = arguments.get("strip_ansi", True)
+        tail_lines = arguments.get("tail")
+
+        async def do_read():
+            args = ["dump-screen", "/dev/stdout"]
+            if arguments.get("full"):
+                args.append("--full")
+            return zellij_action(*args, capture=True, session=session)
+
+        if pane_name:
+            result = await with_pane_focus(pane_name, do_read, session=session)
+        else:
+            result = await do_read()
+
+        # Post-process output
+        if result.get("success") and result.get("stdout"):
+            content = result["stdout"]
+            if do_strip:
+                content = strip_ansi(content)
+            if tail_lines:
+                lines = content.split('\n')
+                content = '\n'.join(lines[-tail_lines:])
+            result["content"] = content
+
+    elif name == "list_panes":
+        layout_result = zellij_action("dump-layout", capture=True, session=session)
+        if layout_result.get("success"):
+            panes = parse_layout_panes(layout_result.get("stdout", ""))
+            result = {"success": True, "panes": panes}
+        else:
+            result = layout_result
+
+    elif name == "focus_pane_by_name":
+        target_name = arguments["name"].lower()
+        layout_result = zellij_action("dump-layout", capture=True, session=session)
+        if not layout_result.get("success"):
+            result = layout_result
+        else:
+            panes = parse_layout_panes(layout_result.get("stdout", ""))
+            target_pane = find_pane_by_name(panes, arguments["name"])
+
+            if not target_pane:
+                result = {"success": False, "error": f"Pane '{arguments['name']}' not found", "available": panes}
+            elif target_pane.get("focused"):
+                result = {"success": True, "message": "Pane already focused"}
+            else:
+                if not target_pane.get("tab_focused"):
+                    tab_result = zellij_action("go-to-tab-name", target_pane["tab"], session=session)
+                    if not tab_result.get("success"):
+                        result = tab_result
+                    else:
+                        result = {"success": True, "message": f"Switched to tab '{target_pane['tab']}' containing pane", "pane": target_pane}
+                else:
+                    result = {"success": True, "message": "Pane is in current tab - use direction keys to navigate", "pane": target_pane}
+
+    elif name == "write_to_pane":
+        pane_name = arguments["pane_name"]
+        chars = arguments["chars"]
+        if arguments.get("press_enter"):
+            chars += "\n"
+
+        async def do_write():
+            return zellij_action("write-chars", chars, session=session)
+
+        result = await with_pane_focus(pane_name, do_write, session=session)
+
+    elif name == "send_keys":
+        keys = arguments["keys"].lower()
+        repeat = arguments.get("repeat", 1)
+        pane_name = arguments.get("pane_name")
+
+        if keys not in KEY_SEQUENCES:
+            result = {"success": False, "error": f"Unknown key: {keys}",
+                      "available": list(KEY_SEQUENCES.keys())}
+        else:
+            byte_seq = KEY_SEQUENCES[keys] * repeat
+            byte_args = [str(b) for b in byte_seq]
+
+            async def do_send():
+                return zellij_action("write", *byte_args, session=session)
+
+            if pane_name:
+                result = await with_pane_focus(pane_name, do_send, session=session)
+            else:
+                result = await do_send()
+
+    elif name == "search_pane":
+        pattern = arguments["pattern"]
+        context = arguments.get("context", 0)
+        pane_name = arguments.get("pane_name")
+
+        async def do_read():
+            args = ["dump-screen", "/dev/stdout"]
+            if arguments.get("full", True):
+                args.append("--full")
+            return zellij_action(*args, capture=True, session=session)
+
+        if pane_name:
+            read_result = await with_pane_focus(pane_name, do_read, session=session)
+        else:
+            read_result = await do_read()
+
+        if not read_result.get("success"):
+            result = read_result
+        else:
+            content = strip_ansi(read_result.get("stdout", ""))
+            lines = content.split('\n')
+            matches = []
+            try:
+                regex = re.compile(pattern, re.IGNORECASE)
+                for i, line in enumerate(lines):
+                    if regex.search(line):
+                        start = max(0, i - context)
+                        end = min(len(lines), i + context + 1)
+                        matches.append({
+                            "line_number": i + 1,
+                            "match": line,
+                            "context": lines[start:end] if context > 0 else None,
+                        })
+                result = {"success": True, "matches": matches, "count": len(matches)}
+            except re.error as e:
+                result = {"success": False, "error": f"Invalid regex: {e}"}
+
+    # === MONITORING ===
+    elif name == "wait_for_output":
+        pattern = arguments["pattern"]
+        timeout = arguments.get("timeout", 30)
+        poll_interval = arguments.get("poll_interval", 1.0)
+        pane_name = arguments.get("pane_name")
+
+        async def do_read():
+            args = ["dump-screen", "/dev/stdout"]
+            return zellij_action(*args, capture=True, session=session)
+
+        start_time = time.time()
+        try:
+            regex = re.compile(pattern)
+        except re.error as e:
+            result = {"success": False, "error": f"Invalid regex: {e}"}
+        else:
+            matched = False
+            match_text = None
+            last_content = ""
+
+            while time.time() - start_time < timeout:
+                if pane_name:
+                    read_result = await with_pane_focus(pane_name, do_read, session=session)
+                else:
+                    read_result = await do_read()
+
+                if read_result.get("success"):
+                    content = strip_ansi(read_result.get("stdout", ""))
+                    last_content = content
+                    match = regex.search(content)
+                    if match:
+                        matched = True
+                        match_text = match.group(0)
+                        break
+
+                await asyncio.sleep(poll_interval)
+
+            elapsed = time.time() - start_time
+            result = {
+                "success": True,
+                "matched": matched,
+                "match": match_text,
+                "elapsed": round(elapsed, 2),
+                "output": last_content[-2000:] if len(last_content) > 2000 else last_content,
+            }
+
+    elif name == "wait_for_idle":
+        stable_seconds = arguments.get("stable_seconds", 3.0)
+        timeout = arguments.get("timeout", 60)
+        poll_interval = arguments.get("poll_interval", 1.0)
+        pane_name = arguments.get("pane_name")
+
+        async def do_read():
+            args = ["dump-screen", "/dev/stdout"]
+            return zellij_action(*args, capture=True, session=session)
+
+        start_time = time.time()
+        last_hash = None
+        stable_since = None
+
+        while time.time() - start_time < timeout:
+            if pane_name:
+                read_result = await with_pane_focus(pane_name, do_read, session=session)
+            else:
+                read_result = await do_read()
+
+            if read_result.get("success"):
+                content = strip_ansi(read_result.get("stdout", ""))
+                current_hash = hashlib.md5(content.encode()).hexdigest()
+
+                if current_hash == last_hash:
+                    if stable_since is None:
+                        stable_since = time.time()
+                    elif time.time() - stable_since >= stable_seconds:
+                        result = {
+                            "success": True,
+                            "idle": True,
+                            "elapsed": round(time.time() - start_time, 2),
+                            "output": content[-2000:],
+                        }
+                        break
+                else:
+                    stable_since = None
+                    last_hash = current_hash
+
+            await asyncio.sleep(poll_interval)
+        else:
+            result = {
+                "success": True,
+                "idle": False,
+                "elapsed": timeout,
+                "message": "Timeout waiting for idle",
+            }
+
+    elif name == "tail_pane":
+        pane_name = arguments.get("pane_name", "default")
+        reset = arguments.get("reset", False)
+
+        async def do_read():
+            args = ["dump-screen", "/dev/stdout", "--full"]
+            return zellij_action(*args, capture=True, session=session)
+
+        if pane_name:
+            read_result = await with_pane_focus(pane_name, do_read, session=session)
+        else:
+            read_result = await do_read()
+            pane_name = "default"
+
+        if not read_result.get("success"):
+            result = read_result
+        else:
+            content = strip_ansi(read_result.get("stdout", ""))
+            lines = content.split('\n')
+            current_count = len(lines)
+
+            if reset:
+                state.pane_cursors[pane_name] = current_count
+                result = {"success": True, "reset": True, "line_count": current_count}
+            else:
+                cursor = state.pane_cursors.get(pane_name, 0)
+                new_lines = lines[cursor:] if cursor < current_count else []
+                state.pane_cursors[pane_name] = current_count
+                result = {
+                    "success": True,
+                    "new_output": '\n'.join(new_lines),
+                    "lines_read": len(new_lines),
+                }
+
+    # === COMPOUND OPERATIONS ===
+    elif name == "run_in_pane":
+        pane_name = arguments["pane_name"]
+        command = arguments["command"]
+        wait = arguments.get("wait", True)
+        timeout = arguments.get("timeout", 30)
+        capture = arguments.get("capture", True)
+        prompt_pattern = arguments.get("prompt_pattern", r"[\$#>]\s*$")
+
+        # Write the command
+        async def do_write():
+            return zellij_action("write-chars", command + "\n", session=session)
+
+        write_result = await with_pane_focus(pane_name, do_write, session=session)
+        if not write_result.get("success"):
+            result = write_result
+        elif not wait:
+            result = {"success": True, "message": "Command sent", "wait": False}
+        else:
+            # Wait for prompt
+            await asyncio.sleep(0.5)  # Initial delay
+
+            async def do_read():
+                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
+
+            start_time = time.time()
+            regex = re.compile(prompt_pattern)
+            output = ""
+
+            while time.time() - start_time < timeout:
+                read_result = await with_pane_focus(pane_name, do_read, session=session)
+                if read_result.get("success"):
+                    content = strip_ansi(read_result.get("stdout", ""))
+                    output = content
+                    # Check last few lines for prompt
+                    last_lines = '\n'.join(content.split('\n')[-5:])
+                    if regex.search(last_lines):
+                        break
+                await asyncio.sleep(1.0)
+
+            elapsed = time.time() - start_time
+            result = {
+                "success": True,
+                "completed": elapsed < timeout,
+                "elapsed": round(elapsed, 2),
+            }
+            if capture:
+                result["output"] = output
+
+    elif name == "create_named_pane":
+        pane_name = arguments["name"]
+        command = arguments.get("command")
+        tab = arguments.get("tab")
+        direction = arguments.get("direction")
+        floating = arguments.get("floating", False)
+        cwd = arguments.get("cwd")
+
+        # Check if pane already exists
+        existing = state.get_pane(pane_name)
+        if existing:
+            # Verify it still exists in layout
+            layout_result = zellij_action("dump-layout", capture=True, session=session)
+            if layout_result.get("success"):
+                panes = parse_layout_panes(layout_result.get("stdout", ""))
+                found = find_pane_by_name(panes, pane_name)
+                if found:
+                    result = {"success": True, "exists": True, "pane": existing.__dict__}
+                else:
+                    state.unregister_pane(pane_name)
+                    existing = None
+
+        if not existing:
+            # Create the tab if needed
+            if tab:
+                layout_result = zellij_action("dump-layout", capture=True, session=session)
+                tab_exists = False
+                if layout_result.get("success"):
+                    if f'name="{tab}"' in layout_result.get("stdout", ""):
+                        tab_exists = True
+                if not tab_exists:
+                    zellij_action("new-tab", "--name", tab, session=session)
+                else:
+                    zellij_action("go-to-tab-name", tab, session=session)
+
+            # Create the pane
+            args = ["new-pane", "--name", pane_name]
+            if floating:
+                args.append("--floating")
+            if direction:
+                args.extend(["--direction", direction])
+            if cwd:
+                args.extend(["--cwd", cwd])
+            if command:
+                args.extend(["--", command])
+
+            create_result = zellij_action(*args, session=session)
+            if create_result.get("success"):
+                # Register in state
+                pane_info = state.register_pane(
+                    name=pane_name,
+                    tab=tab or "current",
+                    command=command,
+                    cwd=cwd,
+                )
+                result = {"success": True, "created": True, "pane": pane_info.__dict__}
+            else:
+                result = create_result
+
+    elif name == "destroy_named_pane":
+        pane_name = arguments["name"]
+
+        async def do_close():
+            return zellij_action("close-pane", session=session)
+
+        close_result = await with_pane_focus(pane_name, do_close, session=session)
+        state.unregister_pane(pane_name)
+        result = {"success": True, "closed": pane_name}
+
+    elif name == "list_named_panes":
+        # Get live layout
+        layout_result = zellij_action("dump-layout", capture=True, session=session)
+        live_panes = []
+        if layout_result.get("success"):
+            live_panes = parse_layout_panes(layout_result.get("stdout", ""))
+
+        # Reconcile with registry
+        pane_list = []
+        for name, pane in state.panes.items():
+            found = find_pane_by_name(live_panes, name)
+            pane_list.append({
+                "name": name,
+                "tab": pane.tab,
+                "command": pane.command,
+                "alive": found is not None,
+                "focused": found.get("focused") if found else False,
+            })
+
+        result = {"success": True, "panes": pane_list}
+
+    # === REPL ===
+    elif name == "repl_execute":
+        pane_name = arguments["pane_name"]
+        code = arguments["code"]
+        repl_type = arguments.get("repl_type", "auto")
+        timeout = arguments.get("timeout", 60)
+
+        # Auto-detect REPL type from pane command
+        if repl_type == "auto":
+            pane_info = state.get_pane(pane_name)
+            if pane_info and pane_info.command:
+                cmd = pane_info.command.lower()
+                if "ipython" in cmd:
+                    repl_type = "ipython"
+                elif "python" in cmd:
+                    repl_type = "python"
+                elif cmd in ("r", "rscript"):
+                    repl_type = "r"
+                elif "julia" in cmd:
+                    repl_type = "julia"
+                else:
+                    repl_type = "default"
+            else:
+                repl_type = "default"
+
+        prompt_pattern = REPL_PROMPTS.get(repl_type, REPL_PROMPTS["default"])
+
+        # Send the code
+        async def do_write():
+            # For multi-line code, send as-is with trailing newlines
+            text = code.strip() + "\n"
+            if '\n' in code:
+                text += "\n"  # Extra newline to close blocks
+            return zellij_action("write-chars", text, session=session)
+
+        write_result = await with_pane_focus(pane_name, do_write, session=session)
+        if not write_result.get("success"):
+            result = write_result
+        else:
+            # Wait for prompt
+            await asyncio.sleep(0.5)
+
+            async def do_read():
+                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
+
+            start_time = time.time()
+            regex = re.compile(prompt_pattern)
+            output = ""
+
+            while time.time() - start_time < timeout:
+                read_result = await with_pane_focus(pane_name, do_read, session=session)
+                if read_result.get("success"):
+                    content = strip_ansi(read_result.get("stdout", ""))
+                    output = content
+                    last_lines = '\n'.join(content.split('\n')[-3:])
+                    if regex.search(last_lines):
+                        break
+                await asyncio.sleep(1.0)
+
+            result = {
+                "success": True,
+                "completed": time.time() - start_time < timeout,
+                "output": output,
+                "repl_type": repl_type,
+            }
+
+    elif name == "repl_interrupt":
+        pane_name = arguments["pane_name"]
+        wait_for_prompt = arguments.get("wait_for_prompt", True)
+        timeout = arguments.get("timeout", 10)
+
+        # Send Ctrl+C
+        async def do_interrupt():
+            return zellij_action("write", "3", session=session)  # ASCII 3 = Ctrl+C
+
+        int_result = await with_pane_focus(pane_name, do_interrupt, session=session)
+
+        if not wait_for_prompt:
+            result = {"success": True, "interrupted": True}
+        else:
+            # Wait for prompt
+            await asyncio.sleep(0.3)
+
+            async def do_read():
+                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
+
+            start_time = time.time()
+            prompt_found = False
+
+            while time.time() - start_time < timeout:
+                read_result = await with_pane_focus(pane_name, do_read, session=session)
+                if read_result.get("success"):
+                    content = strip_ansi(read_result.get("stdout", ""))
+                    last_lines = '\n'.join(content.split('\n')[-3:])
+                    if re.search(REPL_PROMPTS["default"], last_lines):
+                        prompt_found = True
+                        break
+                await asyncio.sleep(0.5)
+
+            result = {"success": True, "interrupted": True, "prompt_returned": prompt_found}
+
+    # === SSH/HPC ===
+    elif name == "ssh_connect":
+        ssh_name = arguments["name"]
+        host = arguments["host"]
+        tab = arguments.get("tab")
+        port = arguments.get("port")
+        identity = arguments.get("identity_file")
+
+        # Build SSH command
+        ssh_cmd = "ssh"
+        if port:
+            ssh_cmd += f" -p {port}"
+        if identity:
+            ssh_cmd += f" -i {identity}"
+        ssh_cmd += f" {host}"
+
+        # Create pane with SSH command
+        args = ["new-pane", "--name", ssh_name, "--", ssh_cmd]
+
+        if tab:
+            layout_result = zellij_action("dump-layout", capture=True, session=session)
+            if layout_result.get("success") and f'name="{tab}"' not in layout_result.get("stdout", ""):
+                zellij_action("new-tab", "--name", tab, session=session)
+            else:
+                zellij_action("go-to-tab-name", tab, session=session)
+
+        create_result = zellij_action(*args, session=session)
+        if create_result.get("success"):
+            state.register_pane(name=ssh_name, tab=tab or "current", command=ssh_cmd)
+            state.ssh_sessions[ssh_name] = SSHSession(
+                name=ssh_name, host=host, pane_name=ssh_name
+            )
+            result = {"success": True, "connected": ssh_name, "host": host}
+        else:
+            result = create_result
+
+    elif name == "ssh_run":
+        ssh_name = arguments["name"]
+        command = arguments["command"]
+        wait = arguments.get("wait", True)
+        timeout = arguments.get("timeout", 30)
+
+        # Delegate to run_in_pane
+        arguments["pane_name"] = ssh_name
+        # Re-call with run_in_pane logic
+        async def do_write():
+            return zellij_action("write-chars", command + "\n", session=session)
+
+        write_result = await with_pane_focus(ssh_name, do_write, session=session)
+        if not write_result.get("success"):
+            result = write_result
+        elif not wait:
+            result = {"success": True, "sent": True}
+        else:
+            await asyncio.sleep(0.5)
+
+            async def do_read():
+                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
+
+            start_time = time.time()
+            output = ""
+
+            while time.time() - start_time < timeout:
+                read_result = await with_pane_focus(ssh_name, do_read, session=session)
+                if read_result.get("success"):
+                    content = strip_ansi(read_result.get("stdout", ""))
+                    output = content
+                    if re.search(r"[\$#>]\s*$", content.split('\n')[-1] if content else ""):
+                        break
+                await asyncio.sleep(1.0)
+
+            result = {"success": True, "output": output, "elapsed": round(time.time() - start_time, 2)}
+
+    elif name == "job_submit":
+        ssh_name = arguments["ssh_name"]
+        script = arguments["script"]
+        scheduler = arguments.get("scheduler", "slurm")
+        extra_args = arguments.get("extra_args", "")
+
+        if scheduler == "slurm":
+            cmd = f"sbatch {extra_args} {script}".strip()
+            job_pattern = r"Submitted batch job (\d+)"
+        else:  # pbs
+            cmd = f"qsub {extra_args} {script}".strip()
+            job_pattern = r"(\d+\.[\w.-]+)"
+
+        # Run the command
+        async def do_write():
+            return zellij_action("write-chars", cmd + "\n", session=session)
+
+        write_result = await with_pane_focus(ssh_name, do_write, session=session)
+        await asyncio.sleep(2.0)
+
+        async def do_read():
+            return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
+
+        read_result = await with_pane_focus(ssh_name, do_read, session=session)
+
+        if read_result.get("success"):
+            content = strip_ansi(read_result.get("stdout", ""))
+            match = re.search(job_pattern, content)
+            if match:
+                job_id = match.group(1)
+                state.tracked_jobs[job_id] = TrackedJob(
+                    job_id=job_id, scheduler=scheduler, ssh_name=ssh_name, script=script
+                )
+                result = {"success": True, "job_id": job_id, "output": content[-500:]}
+            else:
+                result = {"success": False, "error": "Could not parse job ID", "output": content[-500:]}
+        else:
+            result = read_result
+
+    elif name == "job_status":
+        job_id = arguments.get("job_id")
+        ssh_name = arguments.get("ssh_name")
+
+        jobs_to_check = []
+        if job_id:
+            if job_id in state.tracked_jobs:
+                jobs_to_check.append(state.tracked_jobs[job_id])
+            else:
+                jobs_to_check.append(TrackedJob(job_id=job_id, scheduler="slurm",
+                                                ssh_name=ssh_name or "", script=""))
+        else:
+            jobs_to_check = list(state.tracked_jobs.values())
+
+        statuses = []
+        for job in jobs_to_check:
+            target_ssh = ssh_name or job.ssh_name
+            if not target_ssh:
+                statuses.append({"job_id": job.job_id, "error": "No SSH session specified"})
+                continue
+
+            if job.scheduler == "slurm":
+                cmd = f"sacct -j {job.job_id} --format=JobID,State,Elapsed,ExitCode -n 2>/dev/null || squeue -j {job.job_id} -o '%i %T' --noheader"
+            else:
+                cmd = f"qstat {job.job_id}"
+
+            async def do_write():
+                return zellij_action("write-chars", cmd + "\n", session=session)
+
+            await with_pane_focus(target_ssh, do_write, session=session)
+            await asyncio.sleep(1.5)
+
+            async def do_read():
+                return zellij_action("dump-screen", "/dev/stdout", capture=True, session=session)
+
+            read_result = await with_pane_focus(target_ssh, do_read, session=session)
+            if read_result.get("success"):
+                content = strip_ansi(read_result.get("stdout", ""))
+                # Parse status from output
+                lines = content.strip().split('\n')[-10:]
+                statuses.append({"job_id": job.job_id, "output": '\n'.join(lines)})
+            else:
+                statuses.append({"job_id": job.job_id, "error": "Failed to read"})
+
+        result = {"success": True, "jobs": statuses}
 
     # === EDIT ===
     elif name == "edit_file":
@@ -590,11 +1739,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     elif name == "dump_layout":
         result = zellij_action("dump-layout", capture=True, session=session)
 
-    elif name == "dump_screen":
-        args = ["dump-screen", arguments["path"]]
-        if arguments.get("full"):
-            args.append("--full")
-        result = zellij_action(*args, session=session)
 
     elif name == "swap_layout":
         direction = arguments.get("direction", "next")

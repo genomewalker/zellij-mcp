@@ -132,10 +132,13 @@ def is_plugin_available() -> bool:
     return _plugin_available
 
 
-def plugin_command(cmd: str, payload: dict = None, timeout: float = 5.0) -> dict:
+def plugin_command(cmd: str, payload: dict = None, timeout: float = 2.0) -> dict:
     """Execute a command via the pane-bridge plugin.
 
     Returns dict with success/error/data fields.
+
+    Note: zellij pipe outputs data but doesn't exit on its own. We use the
+    shell `timeout` command to force termination after getting the output.
     """
     if not is_plugin_available():
         return {"success": False, "error": "pane-bridge plugin not installed"}
@@ -143,20 +146,21 @@ def plugin_command(cmd: str, payload: dict = None, timeout: float = 5.0) -> dict
     plugin_url = f"file://{_plugin_path_cache}"
     payload_json = json.dumps(payload) if payload else "{}"
 
-    # Escape single quotes in payload for bash
-    payload_escaped = payload_json.replace("'", "'\\''")
-
     try:
-        # Use bash -c with explicit echo pipe - this works reliably
-        # whereas subprocess stdin piping has issues with zellij
-        bash_cmd = f"echo '{payload_escaped}' | zellij pipe -p '{plugin_url}' -n {cmd}"
+        # Use shell with timeout command - this is the only reliable way to get
+        # output from zellij pipe which hangs after outputting data.
+        # Escape single quotes in payload for shell safety
+        escaped_payload = payload_json.replace("'", "'\"'\"'")
+        shell_cmd = f"echo '{escaped_payload}' | timeout {int(timeout)} zellij pipe -p '{plugin_url}' -n {cmd}"
+
         result = subprocess.run(
-            ["bash", "-c", bash_cmd],
-            capture_output=True, text=True, timeout=timeout,
-            env=os.environ.copy()  # Ensure env vars are passed
+            ["bash", "-c", shell_cmd],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 2  # Extra buffer for Python timeout
         )
 
-        # Try to parse response JSON
+        # returncode 124 means timeout killed it (expected), but we got output
         stdout = result.stdout.strip()
         if stdout:
             try:
@@ -164,13 +168,13 @@ def plugin_command(cmd: str, payload: dict = None, timeout: float = 5.0) -> dict
             except json.JSONDecodeError:
                 return {"success": True, "raw": stdout}
 
-        # No output but command ran - assume success for fire-and-forget commands
-        if result.returncode == 0:
-            return {"success": True}
+        # No output - check if there was an error
+        if result.stderr:
+            return {"success": False, "error": result.stderr.strip()}
 
-        return {"success": False, "error": result.stderr or "Plugin command failed"}
+        return {"success": False, "error": "No output from plugin"}
     except subprocess.TimeoutExpired:
-        return {"success": False, "error": f"Plugin command timed out after {timeout}s"}
+        return {"success": False, "error": "Plugin command timed out"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

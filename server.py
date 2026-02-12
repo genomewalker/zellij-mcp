@@ -1873,16 +1873,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         port = arguments.get("port")
         identity = arguments.get("identity_file")
 
-        # Build SSH command
-        ssh_cmd = "ssh"
+        # Build SSH command as argument list (zellij expects separate args after --)
+        ssh_args = ["ssh"]
         if port:
-            ssh_cmd += f" -p {port}"
+            ssh_args.extend(["-p", str(port)])
         if identity:
-            ssh_cmd += f" -i {identity}"
-        ssh_cmd += f" {host}"
+            ssh_args.extend(["-i", identity])
+        ssh_args.append(host)
+        ssh_cmd = " ".join(ssh_args)  # For display/registry
 
         # Create pane with SSH command
-        args = ["new-pane", "--name", ssh_name, "--", ssh_cmd]
+        args = ["new-pane", "--name", ssh_name, "--"] + ssh_args
 
         if tab:
             layout_result = zellij_action("dump-layout", capture=True, session=session)

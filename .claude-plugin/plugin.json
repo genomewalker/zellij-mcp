@@ -1,7 +1,7 @@
 {
   "name": "zellij-mcp",
   "description": "Autonomous Zellij control for Claude Code. Pane targeting, output monitoring, REPL interaction, SSH/HPC workflows.",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "author": {
     "name": "Antonio Fernandez-Guerra",
     "url": "https://github.com/genomewalker"

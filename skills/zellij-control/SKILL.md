@@ -1,10 +1,12 @@
+---
+name: zellij
+description: Interactive control center for managing Zellij sessions, tabs, and panes
+execution: direct
+---
+
 # Zellij Control Center
 
 Interactive control center for managing Zellij sessions, tabs, and panes.
-
-<command-name>zellij</command-name>
-<user-invocable>true</user-invocable>
-<trigger>zellij control, manage panes, switch session, zellij menu</trigger>
 
 ## Instructions
 

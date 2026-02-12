@@ -2282,67 +2282,73 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "tabs": tabs,
                 })
 
-            # Generate visual session map with Unicode box drawing
+            # ANSI color codes
+            ORANGE = "\033[38;5;208m"
+            GREEN = "\033[38;5;82m"
+            DIM = "\033[38;5;240m"
+            BOLD = "\033[1m"
+            RESET = "\033[0m"
+
+            # Generate session map with colors
+            W = 70  # Width
             lines = []
 
-            # Header
-            lines.append("╔══════════════════════════════════════════════════════════════╗")
-            lines.append("║  SESSION MAP                                                 ║")
-            lines.append("╠══════════════════════════════════════════════════════════════╣")
+            lines.append(f"{DIM}┌{'─'*(W-2)}┐{RESET}")
+            lines.append(f"{DIM}│{RESET} {ORANGE}{BOLD}SESSION MAP{RESET}{' '*(W-14)}{DIM}│{RESET}")
+            lines.append(f"{DIM}├{'─'*(W-2)}┤{RESET}")
 
             for i, sess in enumerate(session_maps):
                 is_agent = sess["name"] == "zellij-agent"
                 is_current = sess["current"]
 
-                # Session header
-                status = "● ACTIVE" if is_current else "○ idle"
-                badge = " [AGENT]" if is_agent else ""
-                sess_line = f"  {sess['name']}{badge}"
-                lines.append(f"║{sess_line.ljust(48)}{status.rjust(14)} ║")
+                # Session header with status
+                if is_current:
+                    status = f"{GREEN}● ACTIVE{RESET}"
+                    status_len = 8
+                else:
+                    status = f"{DIM}○ idle{RESET}"
+                    status_len = 6
+
+                badge = f" {ORANGE}[AGENT]{RESET}" if is_agent else ""
+                badge_len = 8 if is_agent else 0
+
+                name_part = f"{BOLD}{sess['name']}{RESET}"
+                padding = W - 4 - len(sess['name']) - badge_len - status_len
+                lines.append(f"{DIM}│{RESET}  {name_part}{badge}{' '*padding}{status} {DIM}│{RESET}")
 
                 if sess["cwd"]:
-                    cwd_short = sess["cwd"][-45:] if len(sess["cwd"]) > 45 else sess["cwd"]
-                    lines.append(f"║  └─ {cwd_short.ljust(57)} ║")
-
-                lines.append("║                                                              ║")
+                    cwd_short = sess["cwd"]
+                    if len(cwd_short) > W - 10:
+                        cwd_short = "..." + cwd_short[-(W-13):]
+                    cwd_line = f"  {DIM}└─{RESET} {cwd_short}"
+                    lines.append(f"{DIM}│{RESET}{cwd_line}{' '*(W-4-len(cwd_short))}{DIM}│{RESET}")
 
                 for tab in sess["tabs"]:
-                    focus_marker = "►" if tab["focused"] else " "
-                    tab_line = f"  {focus_marker} [{tab['name']}]"
-                    lines.append(f"║{tab_line.ljust(62)} ║")
+                    focus = f"{ORANGE}►{RESET}" if tab["focused"] else " "
+                    tab_name = f"[{tab['name']}]"
+                    tab_line = f"   {focus} {tab_name}"
+                    lines.append(f"{DIM}│{RESET}{tab_line}{' '*(W-5-len(tab_name))}{DIM}│{RESET}")
 
                     if not compact:
-                        # Build pane grid (2 columns)
                         panes = tab["panes"] if tab["panes"] else ["shell"]
-                        floating = tab["floating"]
+                        for pane in panes[:6]:
+                            pane_short = pane[:W-12] if len(pane) > W-12 else pane
+                            lines.append(f"{DIM}│{RESET}       {DIM}├─{RESET} {pane_short}{' '*(W-10-len(pane_short))}{DIM}│{RESET}")
 
-                        # Show panes in 2-column grid
-                        for j in range(0, len(panes), 2):
-                            p1 = panes[j][:27] if len(panes[j]) > 27 else panes[j]
-                            if j + 1 < len(panes):
-                                p2 = panes[j+1][:27] if len(panes[j+1]) > 27 else panes[j+1]
-                                lines.append(f"║    ┌{'─'*28}┬{'─'*28}┐  ║")
-                                lines.append(f"║    │ {p1.ljust(26)} │ {p2.ljust(26)} │  ║")
-                                lines.append(f"║    └{'─'*28}┴{'─'*28}┘  ║")
-                            else:
-                                lines.append(f"║    ┌{'─'*28}┐                              ║")
-                                lines.append(f"║    │ {p1.ljust(26)} │                              ║")
-                                lines.append(f"║    └{'─'*28}┘                              ║")
+                        if len(panes) > 6:
+                            more = f"... +{len(panes)-6} more"
+                            lines.append(f"{DIM}│{RESET}       {DIM}└─{RESET} {more}{' '*(W-10-len(more))}{DIM}│{RESET}")
 
-                        # Floating panes
-                        if floating:
-                            float_info = f"⬡ {len(floating)} floating: " + ", ".join(f[:15] for f in floating[:2])
-                            if len(float_info) > 55:
-                                float_info = float_info[:52] + "..."
-                            lines.append(f"║    {float_info.ljust(58)} ║")
+                        if tab["floating"]:
+                            fl = f"{ORANGE}~{RESET} {len(tab['floating'])} floating"
+                            lines.append(f"{DIM}│{RESET}       {fl}{' '*(W-18)}{DIM}│{RESET}")
 
-                # Separator between sessions
                 if i < len(session_maps) - 1:
-                    lines.append("╟──────────────────────────────────────────────────────────────╢")
+                    lines.append(f"{DIM}├{'─'*(W-2)}┤{RESET}")
 
-            lines.append("╚══════════════════════════════════════════════════════════════╝")
+            lines.append(f"{DIM}└{'─'*(W-2)}┘{RESET}")
             lines.append("")
-            lines.append("► = focused tab  ● = current session  ⬡ = floating panes")
+            lines.append(f"{ORANGE}►{RESET} focused  {GREEN}●{RESET} current  {ORANGE}~{RESET} floating")
 
             result = {
                 "success": True,

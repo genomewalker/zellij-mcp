@@ -374,6 +374,7 @@ class PaneInfo:
     repl_type: Optional[str] = None
     pane_index: Optional[int] = None  # Index within tab at creation time
     floating: bool = False  # Whether pane is floating
+    log_path: Optional[str] = None  # Path to script log file for reading output
 
 
 @dataclass
@@ -423,10 +424,12 @@ class SessionState:
 
     def register_pane(self, name: str, tab: str, command: str = None,
                       cwd: str = None, repl_type: str = None,
-                      pane_index: int = None, floating: bool = False) -> PaneInfo:
+                      pane_index: int = None, floating: bool = False,
+                      log_path: str = None) -> PaneInfo:
         """Register a named pane. Thread-safe."""
         pane = PaneInfo(name=name, tab=tab, command=command, cwd=cwd,
-                        repl_type=repl_type, pane_index=pane_index, floating=floating)
+                        repl_type=repl_type, pane_index=pane_index, floating=floating,
+                        log_path=log_path)
         with self._lock:
             self.panes[name] = pane
         return pane
@@ -1685,46 +1688,64 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         do_strip = arguments.get("strip_ansi", True)
         tail_lines = arguments.get("tail")
 
-        async def do_read():
-            args = ["dump-screen", "/dev/stdout"]
-            if arguments.get("full"):
-                args.append("--full")
-            return zellij_action(*args, capture=True, session=session)
+        # Check if pane has a log file (script-based logging)
+        registered_pane = state.get_pane(pane_name) if pane_name else None
+        if registered_pane and registered_pane.log_path and os.path.exists(registered_pane.log_path):
+            # Read from log file - no focus needed!
+            try:
+                with open(registered_pane.log_path, 'r', errors='replace') as f:
+                    content = f.read()
+                if do_strip:
+                    content = strip_ansi(content)
+                if tail_lines:
+                    lines = content.split('\n')
+                    content = '\n'.join(lines[-tail_lines:])
+                result = {"success": True, "content": content, "method": "log_file",
+                          "log_path": registered_pane.log_path}
+            except Exception as e:
+                result = {"success": False, "error": f"Failed to read log: {e}"}
+        else:
+            # Fall back to dump-screen method
+            async def do_read():
+                args = ["dump-screen", "/dev/stdout"]
+                if arguments.get("full"):
+                    args.append("--full")
+                return zellij_action(*args, capture=True, session=session)
 
-        if pane_name:
-            # Try plugin-based focus first (more reliable pane lookup by title)
-            if is_plugin_available():
-                pane_id = plugin_find_pane_id(pane_name, session=session)
-                if pane_id is not None:
-                    # Focus via plugin, then read
-                    focus_result = plugin_command("focus", {"pane_id": pane_id}, session=session)
-                    if focus_result.get("success"):
-                        result = await do_read()
-                        result["method"] = "plugin"
+            if pane_name:
+                # Try plugin-based focus first (more reliable pane lookup by title)
+                if is_plugin_available():
+                    pane_id = plugin_find_pane_id(pane_name, session=session)
+                    if pane_id is not None:
+                        # Focus via plugin, then read
+                        focus_result = plugin_command("focus", {"pane_id": pane_id}, session=session)
+                        if focus_result.get("success"):
+                            result = await do_read()
+                            result["method"] = "plugin"
+                        else:
+                            # Plugin focus failed, fall back to with_pane_focus
+                            result = await with_pane_focus(pane_name, do_read, session=session)
+                            result["method"] = "focus_fallback"
                     else:
-                        # Plugin focus failed, fall back to with_pane_focus
+                        # Pane not found via plugin, try focus method
                         result = await with_pane_focus(pane_name, do_read, session=session)
-                        result["method"] = "focus_fallback"
+                        result["method"] = "focus"
                 else:
-                    # Pane not found via plugin, try focus method
+                    # Plugin not available
                     result = await with_pane_focus(pane_name, do_read, session=session)
                     result["method"] = "focus"
             else:
-                # Plugin not available
-                result = await with_pane_focus(pane_name, do_read, session=session)
-                result["method"] = "focus"
-        else:
-            result = await do_read()
+                result = await do_read()
 
-        # Post-process output
-        if result.get("success") and result.get("stdout"):
-            content = result["stdout"]
-            if do_strip:
-                content = strip_ansi(content)
-            if tail_lines:
-                lines = content.split('\n')
-                content = '\n'.join(lines[-tail_lines:])
-            result["content"] = content
+            # Post-process output
+            if result.get("success") and result.get("stdout"):
+                content = result["stdout"]
+                if do_strip:
+                    content = strip_ansi(content)
+                if tail_lines:
+                    lines = content.split('\n')
+                    content = '\n'.join(lines[-tail_lines:])
+                result["content"] = content
 
     elif name == "list_panes":
         layout_result = zellij_action("dump-layout", capture=True, session=session)
@@ -1971,41 +1992,71 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     elif name == "tail_pane":
         # Panes are in current session (tab-based workspaces)
         pane_name = arguments.get("pane_name")
-
         reset = arguments.get("reset", False)
 
-        async def do_read():
-            args = ["dump-screen", "/dev/stdout", "--full"]
-            return zellij_action(*args, capture=True, session=session)
+        # Check if pane has a log file (script-based logging)
+        registered_pane = state.get_pane(pane_name) if pane_name else None
+        if registered_pane and registered_pane.log_path and os.path.exists(registered_pane.log_path):
+            # Read from log file - no focus needed!
+            try:
+                with open(registered_pane.log_path, 'r', errors='replace') as f:
+                    content = f.read()
+                content = strip_ansi(content)
+                lines = content.split('\n')
+                current_count = len(lines)
 
-        if pane_name:
-            read_result = await with_pane_focus(pane_name, do_read, session=session)
+                cursor_key = f"{_resolve_session_key(session)}:{pane_name}"
+
+                if reset:
+                    state.pane_cursors[cursor_key] = current_count
+                    result = {"success": True, "reset": True, "line_count": current_count,
+                              "method": "log_file"}
+                else:
+                    cursor = state.pane_cursors.get(cursor_key, 0)
+                    new_lines = lines[cursor:] if cursor < current_count else []
+                    state.pane_cursors[cursor_key] = current_count
+                    result = {
+                        "success": True,
+                        "new_output": '\n'.join(new_lines),
+                        "lines_read": len(new_lines),
+                        "method": "log_file",
+                    }
+            except Exception as e:
+                result = {"success": False, "error": f"Failed to read log: {e}"}
         else:
-            read_result = await do_read()
-            pane_name = "_focused"  # Use distinct key for focused pane
+            # Fall back to dump-screen method
+            async def do_read():
+                args = ["dump-screen", "/dev/stdout", "--full"]
+                return zellij_action(*args, capture=True, session=session)
 
-        if not read_result.get("success"):
-            result = read_result
-        else:
-            content = strip_ansi(read_result.get("stdout", ""))
-            lines = content.split('\n')
-            current_count = len(lines)
-
-            # Use session-qualified key to avoid collisions between same pane names in different sessions
-            cursor_key = f"{_resolve_session_key(session)}:{pane_name}"
-
-            if reset:
-                state.pane_cursors[cursor_key] = current_count
-                result = {"success": True, "reset": True, "line_count": current_count}
+            if pane_name:
+                read_result = await with_pane_focus(pane_name, do_read, session=session)
             else:
-                cursor = state.pane_cursors.get(cursor_key, 0)
-                new_lines = lines[cursor:] if cursor < current_count else []
-                state.pane_cursors[cursor_key] = current_count
-                result = {
-                    "success": True,
-                    "new_output": '\n'.join(new_lines),
-                    "lines_read": len(new_lines),
-                }
+                read_result = await do_read()
+                pane_name = "_focused"  # Use distinct key for focused pane
+
+            if not read_result.get("success"):
+                result = read_result
+            else:
+                content = strip_ansi(read_result.get("stdout", ""))
+                lines = content.split('\n')
+                current_count = len(lines)
+
+                # Use session-qualified key to avoid collisions between same pane names in different sessions
+                cursor_key = f"{_resolve_session_key(session)}:{pane_name}"
+
+                if reset:
+                    state.pane_cursors[cursor_key] = current_count
+                    result = {"success": True, "reset": True, "line_count": current_count}
+                else:
+                    cursor = state.pane_cursors.get(cursor_key, 0)
+                    new_lines = lines[cursor:] if cursor < current_count else []
+                    state.pane_cursors[cursor_key] = current_count
+                    result = {
+                        "success": True,
+                        "new_output": '\n'.join(new_lines),
+                        "lines_read": len(new_lines),
+                    }
 
     # === COMPOUND OPERATIONS ===
     elif name == "run_in_pane":
@@ -2116,6 +2167,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                              and not (p.get("command") and "plugin" in str(p.get("command", "")))]
                 pre_pane_count = len(tab_panes)
 
+            # Create log file path for output capture
+            log_dir = os.path.expanduser("~/.local/share/zellij-mcp/logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, f"{pane_name}.log")
+
+            # Remove old log file if exists
+            try:
+                os.unlink(log_path)
+            except FileNotFoundError:
+                pass
+
+            # Wrap command in script for output logging
+            # This enables reading pane output without focus
+            shell_cmd = command or "bash"
+            script_cmd = f"script -q -f {log_path} -c '{shell_cmd}'"
+
             # Create the pane using 'action new-pane' (works in detached sessions)
             args = ["action", "new-pane", "--name", pane_name]
             if floating:
@@ -2124,8 +2191,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 args.extend(["--direction", direction])
             if cwd:
                 args.extend(["--cwd", cwd])
-            if command:
-                args.extend(["--", command])
+            args.extend(["--", script_cmd])
             create_result = run_zellij(*args, session=session)
 
             if create_result.get("success"):
@@ -2158,6 +2224,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     cwd=cwd,
                     pane_index=new_pane_index,
                     floating=floating or False,
+                    log_path=log_path,
                 )
                 result = {"success": True, "created": True, "pane": pane_info.__dict__,
                           "direction": direction}

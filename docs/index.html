@@ -364,6 +364,20 @@ main {
 .pane-indicator.active { background: var(--phosphor); box-shadow: 0 0 6px var(--phosphor); }
 .pane-indicator.amber { background: var(--amber); }
 
+/* Active pane glow effect */
+.term-pane.active-pane {
+  border: 1px solid var(--phosphor) !important;
+  box-shadow: inset 0 0 30px rgba(57, 255, 20, 0.1), 0 0 20px rgba(57, 255, 20, 0.15);
+}
+
+.term-pane.active-pane .pane-header {
+  border-bottom-color: var(--phosphor-dim);
+}
+
+.term-pane.active-pane .pane-title {
+  color: var(--phosphor);
+}
+
 .term-line { margin-bottom: 4px; line-height: 1.5; }
 .term-prompt { color: var(--phosphor); }
 .term-cmd { color: var(--white); }
@@ -882,24 +896,21 @@ footer {
 
         <div class="term-pane" id="pane-ipython">
           <div class="pane-header">
-            <span class="pane-title">ipython</span>
+            <span class="pane-title" id="ipython-title">ipython</span>
             <span class="pane-indicator" id="ipython-indicator"></span>
           </div>
-          <div id="ipython-content" class="term-output" style="color: var(--text-dim);">
-            <div class="term-line">Python 3.11.0</div>
-            <div class="term-line">IPython 8.12.0</div>
-            <div class="term-line">&nbsp;</div>
-            <div class="term-line"><span class="term-info">In [1]:</span> <span id="ipython-cmd"></span></div>
+          <div id="ipython-content">
+            <div class="term-line term-dim" id="ipython-status">waiting...</div>
           </div>
         </div>
 
         <div class="term-pane" id="pane-ssh">
           <div class="pane-header">
-            <span class="pane-title">ssh:hpc</span>
+            <span class="pane-title" id="ssh-title">ssh</span>
             <span class="pane-indicator" id="ssh-indicator"></span>
           </div>
-          <div id="ssh-content" class="term-output" style="color: var(--text-dim);">
-            <div class="term-line" id="ssh-line"></div>
+          <div id="ssh-content">
+            <div class="term-line term-dim" id="ssh-status">disconnected</div>
           </div>
         </div>
       </div>
@@ -1104,36 +1115,64 @@ function copyText(btn, text) {
   setTimeout(() => btn.textContent = 'copy', 2000);
 }
 
-// Demo Animation
+// Demo Animation - Enhanced with side pane activity
 const demo = [
-  { action: 'type', text: 'create an ipython pane in agent session', delay: 40 },
-  { action: 'wait', ms: 400 },
-  { action: 'response', text: 'Creating IPython pane in isolated agent session...' },
+  // Step 1: Create IPython pane
+  { action: 'type', text: 'create an ipython pane', delay: 35 },
+  { action: 'wait', ms: 300 },
+  { action: 'response', text: 'Creating IPython pane in agent session...' },
   { action: 'tool', text: 'create_named_pane name="ipython" command="ipython3"' },
-  { action: 'pane', id: 'ipython-indicator', state: 'active' },
-  { action: 'wait', ms: 800 },
+  { action: 'wait', ms: 200 },
+  { action: 'activatePane', pane: 'ipython' },
+  { action: 'ipythonBoot' },
+  { action: 'wait', ms: 1200 },
+  { action: 'deactivatePane', pane: 'ipython' },
   { action: 'clear' },
-  { action: 'type', text: 'connect to hpc cluster via ssh', delay: 40 },
-  { action: 'wait', ms: 400 },
+
+  // Step 2: Connect SSH
+  { action: 'type', text: 'connect to hpc cluster', delay: 35 },
+  { action: 'wait', ms: 300 },
   { action: 'response', text: 'Opening SSH connection...' },
   { action: 'tool', text: 'ssh_connect name="hpc" host="user@cluster.edu"' },
-  { action: 'pane', id: 'ssh-indicator', state: 'active' },
-  { action: 'ssh', text: 'user@hpc:~$ ' },
-  { action: 'wait', ms: 800 },
+  { action: 'wait', ms: 200 },
+  { action: 'activatePane', pane: 'ssh' },
+  { action: 'sshConnect' },
+  { action: 'wait', ms: 1500 },
+  { action: 'deactivatePane', pane: 'ssh' },
   { action: 'clear' },
-  { action: 'type', text: 'run data analysis in ipython', delay: 40 },
-  { action: 'wait', ms: 400 },
-  { action: 'response', text: 'Executing code in REPL...' },
-  { action: 'tool', text: 'repl_execute pane_name="ipython" code="df.describe()"' },
-  { action: 'ipython', text: 'df.describe()' },
-  { action: 'wait', ms: 800 },
+
+  // Step 3: Run code in IPython
+  { action: 'type', text: 'analyze the data in ipython', delay: 35 },
+  { action: 'wait', ms: 300 },
+  { action: 'response', text: 'Executing code...' },
+  { action: 'tool', text: 'repl_execute pane="ipython" code="df.describe()"' },
+  { action: 'wait', ms: 200 },
+  { action: 'activatePane', pane: 'ipython' },
+  { action: 'ipythonRun' },
+  { action: 'wait', ms: 1500 },
+  { action: 'deactivatePane', pane: 'ipython' },
   { action: 'clear' },
-  { action: 'type', text: 'show me the session map', delay: 40 },
-  { action: 'wait', ms: 400 },
-  { action: 'response', text: 'Here\'s your current layout:' },
+
+  // Step 4: Check jobs on HPC
+  { action: 'type', text: 'check my jobs on the cluster', delay: 35 },
+  { action: 'wait', ms: 300 },
+  { action: 'response', text: 'Querying job status...' },
+  { action: 'tool', text: 'ssh_run name="hpc" command="squeue -u $USER"' },
+  { action: 'wait', ms: 200 },
+  { action: 'activatePane', pane: 'ssh' },
+  { action: 'sshJobs' },
+  { action: 'wait', ms: 1500 },
+  { action: 'deactivatePane', pane: 'ssh' },
+  { action: 'clear' },
+
+  // Step 5: Show session map
+  { action: 'type', text: 'show me the session map', delay: 35 },
+  { action: 'wait', ms: 300 },
+  { action: 'response', text: 'Current layout:' },
   { action: 'tool', text: 'session_map' },
   { action: 'map', show: true },
-  { action: 'wait', ms: 2000 },
+  { action: 'wait', ms: 2500 },
+
   { action: 'restart' }
 ];
 
@@ -1159,7 +1198,7 @@ function runDemo() {
         charIndex = 0;
         demoIndex++;
         document.getElementById('cursor').style.display = 'none';
-        setTimeout(runDemo, 200);
+        setTimeout(runDemo, 150);
       }
       break;
 
@@ -1172,30 +1211,82 @@ function runDemo() {
       document.getElementById('response-line').style.display = 'block';
       document.getElementById('response').textContent = step.text;
       demoIndex++;
-      setTimeout(runDemo, 200);
+      setTimeout(runDemo, 150);
       break;
 
     case 'tool':
       document.getElementById('tool-line').style.display = 'block';
       document.getElementById('tool-call').textContent = step.text;
       demoIndex++;
-      setTimeout(runDemo, 300);
+      setTimeout(runDemo, 200);
       break;
 
-    case 'pane':
-      document.getElementById(step.id).classList.add('active');
+    case 'activatePane':
+      const paneEl = document.getElementById('pane-' + step.pane);
+      const indicator = document.getElementById(step.pane + '-indicator');
+      paneEl.classList.add('active-pane');
+      indicator.classList.add('active');
       demoIndex++;
       setTimeout(runDemo, 100);
       break;
 
-    case 'ssh':
-      document.getElementById('ssh-line').textContent = step.text;
+    case 'deactivatePane':
+      document.getElementById('pane-' + step.pane).classList.remove('active-pane');
       demoIndex++;
       setTimeout(runDemo, 100);
       break;
 
-    case 'ipython':
-      document.getElementById('ipython-cmd').textContent = step.text;
+    case 'ipythonBoot':
+      const ipyContent = document.getElementById('ipython-content');
+      ipyContent.innerHTML = `
+        <div class="term-line" style="color:var(--text-dim)">Python 3.11.0</div>
+        <div class="term-line" style="color:var(--text-dim)">IPython 8.12.0</div>
+        <div class="term-line">&nbsp;</div>
+        <div class="term-line"><span class="term-info">In [1]:</span> <span class="term-cursor"></span></div>
+      `;
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'ipythonRun':
+      const ipyContent2 = document.getElementById('ipython-content');
+      ipyContent2.innerHTML = `
+        <div class="term-line"><span class="term-info">In [2]:</span> <span class="term-cmd">df.describe()</span></div>
+        <div class="term-line" style="color:var(--text-dim)">Out[2]:</div>
+        <div class="term-line" style="color:var(--phosphor)">       count   mean    std</div>
+        <div class="term-line" style="color:var(--phosphor)">col_a  1000   45.2   12.3</div>
+        <div class="term-line" style="color:var(--phosphor)">col_b  1000   78.9   23.1</div>
+        <div class="term-line">&nbsp;</div>
+        <div class="term-line"><span class="term-info">In [3]:</span> <span class="term-cursor"></span></div>
+      `;
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'sshConnect':
+      const sshTitle = document.getElementById('ssh-title');
+      const sshContent = document.getElementById('ssh-content');
+      sshTitle.textContent = 'ssh:hpc';
+      sshContent.innerHTML = `
+        <div class="term-line" style="color:var(--amber)">Connecting to cluster.edu...</div>
+        <div class="term-line" style="color:var(--phosphor)">Authentication successful</div>
+        <div class="term-line">&nbsp;</div>
+        <div class="term-line"><span class="term-prompt">user@hpc:~$</span> <span class="term-cursor"></span></div>
+      `;
+      demoIndex++;
+      setTimeout(runDemo, 100);
+      break;
+
+    case 'sshJobs':
+      const sshContent2 = document.getElementById('ssh-content');
+      sshContent2.innerHTML = `
+        <div class="term-line"><span class="term-prompt">user@hpc:~$</span> <span class="term-cmd">squeue -u $USER</span></div>
+        <div class="term-line" style="color:var(--text-dim)">JOBID   NAME      STATE    TIME</div>
+        <div class="term-line" style="color:var(--phosphor)">84521   analysis  RUNNING  2:34:12</div>
+        <div class="term-line" style="color:var(--amber)">84522   preproc   PENDING  0:00:00</div>
+        <div class="term-line">&nbsp;</div>
+        <div class="term-line"><span class="term-prompt">user@hpc:~$</span> <span class="term-cursor"></span></div>
+      `;
       demoIndex++;
       setTimeout(runDemo, 100);
       break;
@@ -1213,20 +1304,26 @@ function runDemo() {
       document.getElementById('session-map').style.display = 'none';
       document.getElementById('cursor').style.display = 'inline-block';
       demoIndex++;
-      setTimeout(runDemo, 300);
+      setTimeout(runDemo, 400);
       break;
 
     case 'restart':
+      // Reset everything
       document.getElementById('user-input').textContent = '';
       document.getElementById('response-line').style.display = 'none';
       document.getElementById('tool-line').style.display = 'none';
       document.getElementById('session-map').style.display = 'none';
       document.getElementById('cursor').style.display = 'inline-block';
       document.querySelectorAll('.pane-indicator').forEach(el => el.classList.remove('active'));
-      document.getElementById('ssh-line').textContent = '';
-      document.getElementById('ipython-cmd').textContent = '';
+      document.querySelectorAll('.term-pane').forEach(el => el.classList.remove('active-pane'));
+
+      // Reset pane contents
+      document.getElementById('ipython-content').innerHTML = '<div class="term-line term-dim">waiting...</div>';
+      document.getElementById('ssh-content').innerHTML = '<div class="term-line term-dim">disconnected</div>';
+      document.getElementById('ssh-title').textContent = 'ssh';
+
       demoIndex = 0;
-      setTimeout(runDemo, 1500);
+      setTimeout(runDemo, 2000);
       break;
   }
 }
@@ -1241,7 +1338,7 @@ document.querySelectorAll('.header-tab').forEach(tab => {
 
 // Start demo
 window.addEventListener('load', () => {
-  setTimeout(runDemo, 1000);
+  setTimeout(runDemo, 800);
 });
 </script>
 

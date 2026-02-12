@@ -1118,6 +1118,16 @@ async def list_tools() -> list[Tool]:
                 "required": ["name"],
             },
         ),
+        Tool(
+            name="session_map",
+            description="Generate visual ASCII map of all sessions, tabs, and panes",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "compact": {"type": "boolean", "description": "Compact view (less detail)", "default": False},
+                },
+            },
+        ),
         # === LAYOUT ===
         Tool(
             name="dump_layout",
@@ -2157,6 +2167,154 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     elif name == "rename_session":
         result = zellij_action("rename-session", arguments["name"], session=session)
+
+    elif name == "session_map":
+        compact = arguments.get("compact", False)
+        current_session = os.environ.get("ZELLIJ_SESSION_NAME", "")
+
+        # Get all sessions
+        sessions_result = run_zellij("list-sessions", capture=True)
+        if not sessions_result.get("success"):
+            result = sessions_result
+        else:
+            # Parse session names from output
+            session_names = []
+            for line in sessions_result.get("stdout", "").split('\n'):
+                line = strip_ansi(line).strip()
+                if line:
+                    # Format: "session-name [Created Xs ago] (current)"
+                    name_match = re.match(r'^(\S+)', line)
+                    if name_match:
+                        session_names.append({
+                            "name": name_match.group(1),
+                            "current": "(current)" in line,
+                        })
+
+            # Build map for each session
+            session_maps = []
+            for sess in session_names:
+                sess_name = sess["name"]
+                layout_result = zellij_action("dump-layout", capture=True, session=sess_name)
+                if not layout_result.get("success"):
+                    continue
+
+                layout = layout_result.get("stdout", "")
+
+                # Parse cwd
+                cwd_match = re.search(r'cwd\s+"([^"]+)"', layout)
+                cwd = cwd_match.group(1) if cwd_match else ""
+                # Shorten cwd for display
+                if len(cwd) > 50:
+                    cwd = "..." + cwd[-47:]
+
+                # Parse tabs and their panes
+                tabs = []
+                current_tab = None
+
+                for line in layout.split('\n'):
+                    # Match tab lines
+                    tab_match = re.search(r'tab\s+name="([^"]+)".*?(focus=true)?', line)
+                    if tab_match and 'swap_' not in line and 'new_tab_template' not in layout[max(0, layout.find(line)-50):layout.find(line)]:
+                        # Check this isn't inside swap_tiled_layout or new_tab_template
+                        line_pos = layout.find(line)
+                        before = layout[:line_pos]
+                        if 'swap_tiled_layout' in before.split('tab')[-1] if 'tab' in before else '':
+                            continue
+                        if before.count('{') - before.count('}') > 2:  # Deep nesting = template
+                            continue
+
+                        if current_tab:
+                            tabs.append(current_tab)
+                        current_tab = {
+                            "name": tab_match.group(1),
+                            "focused": tab_match.group(2) is not None,
+                            "panes": [],
+                            "floating": [],
+                        }
+                        continue
+
+                    if current_tab:
+                        # Match pane with command
+                        cmd_match = re.search(r'pane\s+command="([^"]+)"', line)
+                        if cmd_match and 'plugin' not in line:
+                            pane_info = cmd_match.group(1)
+                            # Check for name
+                            name_match = re.search(r'name="([^"]+)"', line)
+                            if name_match:
+                                pane_info = f'"{name_match.group(1)}" ({pane_info})'
+                            if 'start_suspended' in line:
+                                pane_info += " [suspended]"
+                            if 'floating_panes' in layout[max(0, layout.find(line)-200):layout.find(line)]:
+                                current_tab["floating"].append(pane_info)
+                            else:
+                                current_tab["panes"].append(pane_info)
+                        # Match named pane without command
+                        elif 'pane' in line and 'plugin' not in line and 'size=' not in line.split('pane')[0]:
+                            name_match = re.search(r'name="([^"]+)"', line)
+                            if name_match:
+                                pane_info = f'"{name_match.group(1)}"'
+                                if 'floating_panes' in layout[max(0, layout.find(line)-200):layout.find(line)]:
+                                    current_tab["floating"].append(pane_info)
+                                else:
+                                    current_tab["panes"].append(pane_info)
+
+                if current_tab:
+                    tabs.append(current_tab)
+
+                session_maps.append({
+                    "name": sess_name,
+                    "current": sess["current"],
+                    "cwd": cwd,
+                    "tabs": tabs,
+                })
+
+            # Generate ASCII map
+            lines = []
+            lines.append("╔" + "═" * 78 + "╗")
+            lines.append("║" + "ZELLIJ SESSION MAP".center(78) + "║")
+            lines.append("╠" + "═" * 78 + "╣")
+
+            for sess in session_maps:
+                marker = " (CURRENT)" if sess["current"] else ""
+                agent = " [AGENT]" if sess["name"] == "zellij-agent" else ""
+                lines.append("║" + " " * 78 + "║")
+                lines.append("║  " + f"┌─ {sess['name']}{marker}{agent} ".ljust(75, "─") + "┐ ║")
+                if sess["cwd"]:
+                    lines.append("║  │  " + f"cwd: {sess['cwd']}".ljust(72) + "│ ║")
+
+                for tab in sess["tabs"]:
+                    focus = "*" if tab["focused"] else ""
+                    lines.append("║  │" + " " * 73 + "│ ║")
+                    lines.append("║  │  " + f"[{tab['name']}]{focus}".ljust(72) + "│ ║")
+
+                    if not compact:
+                        # Show panes
+                        panes = tab["panes"] if tab["panes"] else ["shell"]
+                        for pane in panes[:4]:  # Limit to 4 panes
+                            pane_display = pane[:65] + "..." if len(pane) > 68 else pane
+                            lines.append("║  │    " + f"├─ {pane_display}".ljust(70) + "│ ║")
+
+                        if len(panes) > 4:
+                            lines.append("║  │    " + f"└─ ... and {len(panes) - 4} more".ljust(70) + "│ ║")
+
+                        # Show floating panes
+                        if tab["floating"]:
+                            float_count = len(tab["floating"])
+                            float_info = tab["floating"][0] if float_count == 1 else f"{float_count} floating"
+                            lines.append("║  │    " + f"󰀁 {float_info}".ljust(70) + "│ ║")
+
+                lines.append("║  " + "└" + "─" * 75 + "┘ ║")
+
+            lines.append("║" + " " * 78 + "║")
+            lines.append("╚" + "═" * 78 + "╝")
+            lines.append("")
+            lines.append("Legend: * = focused tab, 󰀁 = floating, [AGENT] = agent session")
+
+            result = {
+                "success": True,
+                "map": "\n".join(lines),
+                "sessions": session_maps,
+            }
 
     # === LAYOUT ===
     elif name == "dump_layout":

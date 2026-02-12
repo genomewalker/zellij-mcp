@@ -115,6 +115,31 @@ KEY_SEQUENCES: dict[str, list[int]] = {
     "f11": [27, 91, 50, 51, 126], "f12": [27, 91, 50, 52, 126],
 }
 
+def calculate_grid_direction(pane_count: int) -> str:
+    """Calculate optimal split direction for grid layout.
+
+    Strategy: Alternate between right and down to create balanced grid.
+    - 0 panes: first pane, no split needed
+    - 1 pane:  split right  → 2 columns
+    - 2 panes: split down   → 2x2 grid start
+    - 3 panes: split right  → balance
+    - 4 panes: split down   → 2x3 or 3x2
+    ...
+
+    This creates layouts like:
+    1: [A]
+    2: [A][B]
+    3: [A][B]
+       [C]
+    4: [A][B]
+       [C][D]
+    """
+    if pane_count <= 0:
+        return "right"  # First split
+    # Alternate: odd count → right, even count → down
+    return "right" if pane_count % 2 == 1 else "down"
+
+
 # REPL prompt patterns for auto-detection
 REPL_PROMPTS: dict[str, str] = {
     "ipython": r"In \[\d+\]:\s*$",
@@ -1489,6 +1514,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 else:
                     zellij_action("go-to-tab-name", tab, session=session)
 
+            # Smart grid layout: calculate direction if not specified
+            if not direction and not floating:
+                # Count existing panes in session
+                layout_result = zellij_action("dump-layout", capture=True, session=session)
+                if layout_result.get("success"):
+                    panes = parse_layout_panes(layout_result.get("stdout", ""))
+                    direction = calculate_grid_direction(len(panes))
+
             # Create the pane
             args = ["new-pane", "--name", pane_name]
             if floating:
@@ -1502,6 +1535,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             create_result = zellij_action(*args, session=session)
             if create_result.get("success"):
+                # Rename pane to ensure name persists in layout
+                zellij_action("rename-pane", pane_name, session=session)
                 # Register in state
                 pane_info = state.register_pane(
                     name=pane_name,
@@ -1509,7 +1544,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     command=command,
                     cwd=cwd,
                 )
-                result = {"success": True, "created": True, "pane": pane_info.__dict__}
+                result = {"success": True, "created": True, "pane": pane_info.__dict__,
+                          "direction": direction}
             else:
                 result = create_result
 
@@ -1688,6 +1724,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         create_result = zellij_action(*args, session=session)
         if create_result.get("success"):
+            # Rename pane to ensure name persists in layout
+            zellij_action("rename-pane", ssh_name, session=session)
             state.register_pane(name=ssh_name, tab=tab or "current", command=ssh_cmd)
             state.ssh_sessions[ssh_name] = SSHSession(
                 name=ssh_name, host=host, pane_name=ssh_name

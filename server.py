@@ -2289,6 +2289,145 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             B = "\033[1m"         # bold
             R = "\033[0m"         # reset
 
+            def parse_layout_tree(layout_str: str) -> dict:
+                """Parse layout string into a tree structure for a tab."""
+                lines_iter = iter(layout_str.split('\n'))
+
+                def parse_pane(depth=0):
+                    """Recursively parse pane structure."""
+                    pane = {"type": "pane", "children": [], "name": None, "command": None,
+                            "split": "horizontal", "size": None, "focused": False}
+
+                    for line in lines_iter:
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+
+                        # End of block
+                        if stripped == '}':
+                            return pane
+
+                        # Check for pane properties
+                        if 'split_direction="vertical"' in stripped:
+                            pane["split"] = "vertical"
+                        if 'focus=true' in stripped and 'hide_floating' not in stripped:
+                            pane["focused"] = True
+
+                        # Extract command
+                        cmd_match = re.search(r'command="([^"]+)"', stripped)
+                        if cmd_match:
+                            pane["command"] = cmd_match.group(1)
+
+                        # Extract name
+                        name_match = re.search(r'name="([^"]+)"', stripped)
+                        if name_match and 'tab ' not in stripped:
+                            pane["name"] = name_match.group(1)
+
+                        # Extract size
+                        size_match = re.search(r'size="?(\d+%?)"?', stripped)
+                        if size_match:
+                            pane["size"] = size_match.group(1)
+
+                        # Skip plugins
+                        if 'plugin' in stripped:
+                            # Skip until closing brace
+                            brace_count = stripped.count('{') - stripped.count('}')
+                            while brace_count > 0:
+                                next_line = next(lines_iter, '')
+                                brace_count += next_line.count('{') - next_line.count('}')
+                            continue
+
+                        # Nested pane
+                        if stripped.startswith('pane') and '{' in stripped:
+                            child = parse_pane(depth + 1)
+                            if child and (child["children"] or child["command"] or child["name"]):
+                                pane["children"].append(child)
+                        elif stripped == 'pane':
+                            # Simple pane without children
+                            pane["children"].append({"type": "pane", "children": [],
+                                                     "name": None, "command": None, "split": "horizontal"})
+
+                    return pane
+
+                return parse_pane()
+
+            def render_layout(pane: dict, width: int, height: int, x: int = 0, y: int = 0) -> list:
+                """Render pane tree into a 2D grid. Returns list of (x, y, w, h, label)."""
+                cells = []
+
+                children = [c for c in pane.get("children", []) if c.get("children") or c.get("command") or not c.get("name")]
+
+                if not children:
+                    # Leaf pane
+                    label = pane.get("command") or pane.get("name") or "shell"
+                    label = label.split('/')[-1][:12]  # Shorten
+                    cells.append((x, y, width, height, label, pane.get("focused", False)))
+                else:
+                    # Container - split children
+                    is_vertical = pane.get("split") == "vertical"
+                    n = len(children)
+
+                    if is_vertical:
+                        # Horizontal arrangement (side by side)
+                        cw = width // n
+                        for i, child in enumerate(children):
+                            cx = x + i * cw
+                            actual_w = cw if i < n - 1 else (width - i * cw)
+                            cells.extend(render_layout(child, actual_w, height, cx, y))
+                    else:
+                        # Vertical arrangement (stacked)
+                        ch = height // n
+                        for i, child in enumerate(children):
+                            cy = y + i * ch
+                            actual_h = ch if i < n - 1 else (height - i * ch)
+                            cells.extend(render_layout(child, width, actual_h, x, cy))
+
+                return cells
+
+            def draw_grid(cells: list, width: int, height: int) -> list:
+                """Draw cells as ASCII grid."""
+                # Initialize grid
+                grid = [[' ' for _ in range(width)] for _ in range(height)]
+
+                for cx, cy, cw, ch, label, focused in cells:
+                    if cw < 3 or ch < 2:
+                        continue
+
+                    # Draw box
+                    for i in range(cx, cx + cw):
+                        if i < width:
+                            if cy < height:
+                                grid[cy][i] = '─'
+                            if cy + ch - 1 < height:
+                                grid[cy + ch - 1][i] = '─'
+
+                    for j in range(cy, cy + ch):
+                        if j < height:
+                            if cx < width:
+                                grid[j][cx] = '│'
+                            if cx + cw - 1 < width:
+                                grid[j][cx + cw - 1] = '│'
+
+                    # Corners
+                    if cy < height and cx < width:
+                        grid[cy][cx] = '┌'
+                    if cy < height and cx + cw - 1 < width:
+                        grid[cy][cx + cw - 1] = '┐'
+                    if cy + ch - 1 < height and cx < width:
+                        grid[cy + ch - 1][cx] = '└'
+                    if cy + ch - 1 < height and cx + cw - 1 < width:
+                        grid[cy + ch - 1][cx + cw - 1] = '┘'
+
+                    # Label (centered)
+                    label_y = cy + ch // 2
+                    label_x = cx + (cw - len(label)) // 2
+                    if label_y < height:
+                        for k, char in enumerate(label[:cw-2]):
+                            if label_x + k < width and label_x + k > cx:
+                                grid[label_y][label_x + k] = char
+
+                return [''.join(row) for row in grid]
+
             lines = []
 
             for i, sess in enumerate(session_maps):
@@ -2296,7 +2435,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 is_agent = name == "zellij-agent"
                 is_current = sess["current"]
 
-                # Session header box
+                # Session header
                 badge = f" {O}[AGENT]{R}" if is_agent else ""
                 badge_len = 8 if is_agent else 0
                 status = f"{G}●{R}" if is_current else f"{D}○{R}"
@@ -2308,49 +2447,58 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 lines.append(f"{O}║{R} {header}{' ' * (60 - header_len)} {O}║{R}")
                 lines.append(f"{O}╚{'═' * 62}╝{R}")
 
-                # Tabs
+                # Get full layout for this session
+                layout_result = zellij_action("dump-layout", capture=True, session=name)
+                layout_str = layout_result.get("stdout", "") if layout_result.get("success") else ""
+
+                # Parse tabs from layout
                 for tab in sess["tabs"]:
                     tname = tab["name"]
                     is_focused = tab["focused"]
 
-                    # Tab header
                     focus = f"{O}►{R} " if is_focused else "  "
                     tab_status = f"{G}active{R}" if is_focused else f"{D}idle{R}"
                     lines.append(f"  {focus}{D}[{R}{tname}{D}]{R} {tab_status}")
 
                     if not compact:
-                        # Collect all panes (tiled + floating)
-                        all_panes = []
-                        for p in (tab["panes"] if tab["panes"] else ["shell"]):
-                            all_panes.append((p[:20], "run"))
-                        for f in tab["floating"]:
-                            all_panes.append((f[:20], "float"))
+                        # Extract tab section from layout
+                        tab_pattern = rf'tab name="{re.escape(tname)}"[^{{]*\{{'
+                        tab_match = re.search(tab_pattern, layout_str)
 
-                        # Draw panes in 2-column grid
-                        if all_panes:
-                            # Top border
-                            lines.append(f"  {D}┌{'─' * 28}┬{'─' * 28}┐{R}")
+                        if tab_match:
+                            # Find the matching closing brace
+                            start = tab_match.end()
+                            brace_count = 1
+                            end = start
+                            while brace_count > 0 and end < len(layout_str):
+                                if layout_str[end] == '{':
+                                    brace_count += 1
+                                elif layout_str[end] == '}':
+                                    brace_count -= 1
+                                end += 1
 
-                            for j in range(0, len(all_panes), 2):
-                                p1_name, p1_status = all_panes[j]
-                                p1 = f"{p1_name:<20} {D}{p1_status:>5}{R}"
+                            tab_content = layout_str[start:end-1]
 
-                                if j + 1 < len(all_panes):
-                                    p2_name, p2_status = all_panes[j + 1]
-                                    p2 = f"{p2_name:<20} {D}{p2_status:>5}{R}"
-                                else:
-                                    p2 = " " * 26
-                                    p2_status = ""
+                            # Parse and render
+                            tree = parse_layout_tree(tab_content)
+                            cells = render_layout(tree, 60, 6, 0, 0)
 
-                                lines.append(f"  {D}│{R} {p1} {D}│{R} {p2} {D}│{R}")
+                            if cells:
+                                grid_lines = draw_grid(cells, 60, 6)
+                                for gl in grid_lines:
+                                    lines.append(f"  {D}{gl}{R}")
 
-                            # Bottom border
-                            lines.append(f"  {D}└{'─' * 28}┴{'─' * 28}┘{R}")
+                        # Floating panes
+                        if tab["floating"]:
+                            fl_names = ", ".join(f[:15] for f in tab["floating"][:3])
+                            if len(tab["floating"]) > 3:
+                                fl_names += f" +{len(tab['floating'])-3}"
+                            lines.append(f"  {O}~{R} floating: {fl_names}")
 
-                lines.append("")  # Space between sessions
+                lines.append("")
 
             # Legend
-            lines.append(f"{O}●{R} current  {D}○{R} idle  {O}►{R} focused tab")
+            lines.append(f"{O}●{R} current  {D}○{R} idle  {O}►{R} focused tab  {O}~{R} floating")
 
             result = {
                 "success": True,

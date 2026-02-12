@@ -905,7 +905,7 @@ footer {
   <!-- Hero Section -->
   <section class="hero">
     <div class="hero-left">
-      <div class="version-badge">v0.12.0 — Focus-Free Control</div>
+      <div class="version-badge">v0.12.1 — Focus-Free Control</div>
       <h1 class="hero-title">zellij<span>-</span>mcp</h1>
       <p class="hero-sub">Terminal Orchestration for Claude</p>
       <p class="hero-desc">
@@ -996,36 +996,36 @@ footer {
   <section class="install-section" id="install">
     <div class="install-left">
       <span class="section-label">Get Started</span>
-      <h2 class="section-title">Three commands.<br>Full control.</h2>
+      <h2 class="section-title">One command.<br>Full control.</h2>
     </div>
     <div class="install-right">
       <div class="install-step">
         <div class="step-num">01</div>
         <div class="step-content">
-          <h4>Clone the repository</h4>
+          <h4>Install via Claude Code</h4>
           <div class="code-block">
-            <code>git clone https://github.com/genomewalker/zellij-mcp</code>
-            <button class="copy-btn" onclick="copyText(this, 'git clone https://github.com/genomewalker/zellij-mcp')">copy</button>
+            <code>/plugin genomewalker/zellij-mcp</code>
+            <button class="copy-btn" onclick="copyText(this, '/plugin genomewalker/zellij-mcp')">copy</button>
           </div>
         </div>
       </div>
       <div class="install-step">
         <div class="step-num">02</div>
         <div class="step-content">
-          <h4>Run the installer</h4>
-          <div class="code-block">
-            <code>cd zellij-mcp && ./scripts/install.sh</code>
-            <button class="copy-btn" onclick="copyText(this, 'cd zellij-mcp && ./scripts/install.sh')">copy</button>
-          </div>
-        </div>
-      </div>
-      <div class="install-step">
-        <div class="step-num">03</div>
-        <div class="step-content">
           <h4>Restart Claude Code</h4>
           <div class="code-block">
             <code>Then: "create a pane for my tests"</code>
             <button class="copy-btn" style="visibility: hidden;">copy</button>
+          </div>
+        </div>
+      </div>
+      <div class="install-step">
+        <div class="step-num">—</div>
+        <div class="step-content">
+          <h4>Or install manually</h4>
+          <div class="code-block">
+            <code>curl -fsSL https://raw.githubusercontent.com/genomewalker/zellij-mcp/main/scripts/install.sh | bash</code>
+            <button class="copy-btn" onclick="copyText(this, 'curl -fsSL https://raw.githubusercontent.com/genomewalker/zellij-mcp/main/scripts/install.sh | bash')">copy</button>
           </div>
         </div>
       </div>

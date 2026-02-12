@@ -26,13 +26,21 @@
 
 ## Install
 
-```bash
-git clone https://github.com/genomewalker/zellij-mcp
-cd zellij-mcp
-./scripts/install.sh
+### Via Claude Code Plugin System (Recommended)
+
+```
+/plugin genomewalker/zellij-mcp
 ```
 
 Then **restart Claude Code**.
+
+### Manual Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/genomewalker/zellij-mcp/main/scripts/install.sh | bash
+```
+
+To update: `cd ~/.local/share/zellij-mcp && git pull && ./scripts/install.sh`
 
 ---
 

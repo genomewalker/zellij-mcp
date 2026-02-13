@@ -20,6 +20,43 @@ from mcp.types import Tool, TextContent
 
 server = Server("zellij-mcp")
 
+# Tools to HIDE from tools/list (still callable, just not listed)
+# Goal: Expose only ~15 essential tools to save context tokens
+HIDDEN_TOOLS = {
+    # Agents (specialized)
+    "agent_output", "agent_session", "spawn_agents", "stop_agent", "list_spawned_agents",
+    # Jobs (specialized)
+    "job_status", "job_submit",
+    # SSH (specialized)
+    "ssh_connect", "ssh_run",
+    # REPL (specialized)
+    "repl_execute", "repl_interrupt",
+    # Named panes (advanced)
+    "create_named_pane", "destroy_named_pane", "focus_pane_by_name", "list_named_panes",
+    # Layout (advanced)
+    "dump_layout", "swap_layout", "stack_panes",
+    # Moving (advanced)
+    "move_pane", "move_pane_backwards", "move_tab",
+    # Scrolling (advanced)
+    "scroll", "edit_scrollback",
+    # Toggles (advanced)
+    "toggle_embed_or_floating", "toggle_floating", "toggle_fullscreen",
+    "toggle_pane_frames", "toggle_sync_tab",
+    # Resizing (advanced)
+    "resize_pane",
+    # Rename (advanced)
+    "rename_pane", "rename_session", "rename_tab",
+    "undo_rename_pane", "undo_rename_tab",
+    # Focus navigation (advanced)
+    "focus_next_pane", "focus_previous_pane",
+    # Waiting (advanced)
+    "wait_for_idle", "wait_for_output",
+    # Misc (advanced)
+    "pipe", "send_keys", "write_chars", "search_pane", "tail_pane",
+    "list_clients", "edit_file", "launch_plugin", "query_tab_names",
+    "session_attach", "session_map",
+}
+
 
 # =============================================================================
 # WORKSPACE TABS - Organized workspaces within current session
@@ -1193,13 +1230,15 @@ MODE_ENUM = {"type": "string", "enum": ["locked", "pane", "tab", "resize", "move
 
 
 def with_session(tools: list[Tool]) -> list[Tool]:
-    """Add session parameter to all tool schemas."""
-    for tool in tools:
+    """Add session parameter to all tool schemas and filter hidden tools."""
+    # Filter hidden tools to save context tokens
+    filtered = [t for t in tools if t.name not in HIDDEN_TOOLS]
+    for tool in filtered:
         tool.inputSchema["properties"] = {
             **tool.inputSchema.get("properties", {}),
             **SESSION_PARAM,
         }
-    return tools
+    return filtered
 
 
 @server.list_tools()
